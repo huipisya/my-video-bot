@@ -9,9 +9,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import yt_dlp
 
-# 🔑 Твой токен
-import os
+# 🔑 Токен из переменной окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN не установлен! Добавь его в Railway Variables.")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -26,31 +28,33 @@ def get_quality_setting(user_id):
     return user_settings.get(user_id, "1080p")
 
 def get_ydl_opts(quality="1080p"):
+    base_opts = {
+        'noplaylist': True,
+        'outtmpl': os.path.join(tempfile.gettempdir(), '%(title).50s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'retries': 5,
+        'fragment_retries': 5,
+        'extractor_retries': 5,
+    }
     if quality == "480p":
-        return {
-            'format': 'best[height<=480][ext=mp4]/best[ext=mp4]/best',
-            'noplaylist': True,
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(title).50s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-        }
+        base_opts['format'] = 'best[height<=480][ext=mp4]/best[ext=mp4]/best'
     else:  # 1080p
-        return {
-            'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4',
-            'noplaylist': True,
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(title).50s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-        }
+        base_opts['format'] = 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        base_opts['merge_output_format'] = 'mp4'
+    
+    # Используем куки, если файл существует
+    if os.path.exists("cookies.txt"):
+        base_opts['cookiefile'] = "cookies.txt"
+        print("✅ Использую cookies.txt для YouTube")
+    
+    return base_opts
 
-# ✅ ИСПРАВЛЕНО: обычная функция (НЕ async def!)
 def upload_to_fileio(file_path):
     """Загружает файл на file.io, ссылка живёт 3 дня"""
     try:
         with open(file_path, 'rb') as f:
-            # ⏳ expires=3d — 3 дня
-            response = requests.post('https://file.io/?expires=3d', files={'file': f}, timeout=300)
+            response = requests.post('https://file.io/?expires=3d', files={'file': f}, timeout=600)
         if response.status_code == 200:
             data = response.json()
             return data.get('link')
@@ -68,7 +72,7 @@ async def start(message: types.Message, state: FSMContext):
     )
     await message.answer(
         "🎥 Отправь ссылку на TikTok или YouTube Shorts!\n\n"
-        "По умолчанию:1080p.\n"
+        "По умолчанию: 1080p.\n"
         "Нажми «⚙️ Настройки», чтобы выбрать качество.",
         reply_markup=kb
     )
@@ -82,7 +86,7 @@ async def settings_menu(message: types.Message, state: FSMContext):
             [KeyboardButton(text="⚡ 480p — Скорость")]
         ],
         resize_keyboard=True,
-        one_time_keyboard=False  # ← ВАЖНО: False, чтобы клавиатура НЕ исчезала
+        one_time_keyboard=False
     )
     await message.answer("Выбери качество видео:", reply_markup=kb)
 
@@ -90,25 +94,23 @@ async def settings_menu(message: types.Message, state: FSMContext):
 async def set_quality_1080p(message: types.Message, state: FSMContext):
     user_settings[message.from_user.id] = "1080p"
     await state.clear()
-    # Возвращаем основную клавиатуру
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
         resize_keyboard=True,
         one_time_keyboard=False
     )
-    await message.answer("✅ Выбрано: 1080p (качество)", reply_markup=kb)
+    await message.answer("✅ Выбрано: **1080p (качество)**", reply_markup=kb)
 
 @dp.message(VideoStates.choosing_quality, F.text.contains("480p"))
 async def set_quality_480p(message: types.Message, state: FSMContext):
     user_settings[message.from_user.id] = "480p"
     await state.clear()
-    # Возвращаем основную клавиатуру
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
         resize_keyboard=True,
         one_time_keyboard=False
     )
-    await message.answer("✅ Выбрано: 480p (скорость)", reply_markup=kb)
+    await message.answer("✅ Выбрано: **480p (скорость)**", reply_markup=kb)
 
 @dp.message()
 async def download_video(message: types.Message):
@@ -119,7 +121,7 @@ async def download_video(message: types.Message):
 
     user_id = message.from_user.id
     quality = get_quality_setting(user_id)
-    await message.answer(f"⏳ Скачиваю в {quality}... Это может занять время.")
+    await message.answer(f"⏳ Скачиваю в {quality}... Это может занять 1-3 минуты.")
 
     temp_file = None
     try:
@@ -129,7 +131,7 @@ async def download_video(message: types.Message):
             temp_file = ydl.prepare_filename(info)
 
         if not os.path.exists(temp_file):
-            raise Exception("Файл не сохранён")
+            raise Exception("Файл не был сохранён")
 
         file_size = os.path.getsize(temp_file)
         file_size_mb = file_size / (1024 * 1024)
@@ -138,7 +140,7 @@ async def download_video(message: types.Message):
             await bot.send_video(
                 chat_id=message.chat.id,
                 video=types.FSInputFile(temp_file),
-                caption=f"Вот твоё видео ({quality})!"
+                caption=f"✅ Вот твоё видео ({quality})!"
             )
         else:
             await message.answer(
@@ -147,7 +149,6 @@ async def download_video(message: types.Message):
             )
             await message.answer("📤 Загружаю на облако...")
 
-            # ✅ Теперь работает правильно
             download_link = await asyncio.get_event_loop().run_in_executor(None, upload_to_fileio, temp_file)
 
             if download_link:
@@ -164,17 +165,21 @@ async def download_video(message: types.Message):
             await message.answer("❌ Это приватное видео.")
         elif "404" in error_msg or "not found" in error_msg.lower():
             await message.answer("❌ Видео не найдено.")
+        elif "Sign in to confirm" in error_msg:
+            await message.answer("❌ YouTube временно заблокировал загрузку. Попробуй позже или другое видео.")
+        elif "ffmpeg" in error_msg.lower():
+            await message.answer("❌ Проблема с обработкой видео. Попробуй 480p качество.")
         else:
-            await message.answer(f"❌ Ошибка: {error_msg[:200]}")
+            await message.answer(f"❌ Ошибка: {error_msg[:150]}")
     finally:
         if temp_file and os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
-            except:
-                pass
+            except Exception as e:
+                print(f"Не удалось удалить файл: {e}")
 
 async def main():
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен и готов к работе!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
