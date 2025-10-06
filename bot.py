@@ -297,64 +297,40 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
 
     return None, None, "❌ Не удалось скачать контент из Instagram всеми методами"
 
-# === 📤 НОВЫЙ МЕТОД: СКАЧИВАНИЕ TIKTOK ФОТО ЧЕРЕЗ yt-dlp С ПРАВИЛЬНЫМИ НАСТРОЙКАМИ ===
+# === 📤 СКАЧИВАНИЕ TIKTOK ФОТО ЧЕРЕЗ yt-dlp ===
 async def download_tiktok_photos_ytdlp_improved(url: str) -> Tuple[Optional[List[str]], Optional[str]]:
-    """Скачать фото из TikTok через yt-dlp с улучшенными настройками"""
+    """Скачать метаданные из TikTok через yt-dlp (без загрузки)"""
     try:
-        logger.info("🔄 TikTok: попытка через yt-dlp (улучшенный метод)...")
+        logger.info("🔄 TikTok: попытка получить метаданные через yt-dlp...")
         
-        # Специальные настройки для TikTok фото
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
+            'skip_download': True,  # Не скачиваем, только метаданные
             'extract_flat': False,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Referer': 'https://www.tiktok.com/'
             }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            # Убираем /photo/ из URL для получения метаданных
+            clean_url = url.replace('/photo/', '/video/')
+            info = ydl.extract_info(clean_url, download=False)
             
-            # Проверяем, есть ли изображения
             if not info:
                 return None, None
             
-            description = info.get('description', '') or info.get('title', 'Без описания')
-            photos = []
+            # Получаем только описание и автора
+            author = info.get('uploader', info.get('creator', 'Неизвестный автор'))
+            description = info.get('description', info.get('title', ''))
             
-            # Случай 1: Несколько изображений (слайдшоу)
-            if 'entries' in info:
-                logger.info(f"TikTok: найдено {len(info['entries'])} изображений")
-                for i, entry in enumerate(info['entries'][:30]):  # Лимит 30 фото
-                    # Пробуем разные поля для URL изображения
-                    img_url = (entry.get('url') or 
-                              entry.get('thumbnail') or 
-                              entry.get('webpage_url'))
-                    
-                    if img_url:
-                        img_path = os.path.join(tempfile.gettempdir(), f"tiktok_{info.get('id', i)}_{i}.jpg")
-                        logger.info(f"Скачиваем изображение {i+1}: {img_url}")
-                        if await download_file(img_url, img_path):
-                            photos.append(img_path)
-            
-            # Случай 2: Одно изображение
-            elif info.get('thumbnail'):
-                img_url = info['thumbnail']
-                img_path = os.path.join(tempfile.gettempdir(), f"tiktok_{info.get('id', 'single')}.jpg")
-                logger.info(f"Скачиваем одиночное изображение: {img_url}")
-                if await download_file(img_url, img_path):
-                    photos.append(img_path)
-            
-            if photos:
-                logger.info(f"✅ TikTok: скачано {len(photos)} фото через yt-dlp")
-                return (photos, description)
-            else:
-                logger.warning("TikTok: не удалось извлечь URL изображений")
+            logger.info(f"✅ TikTok: получены метаданные (автор: {author})")
+            return None, None  # Возвращаем None, чтобы перейти к следующим методам
 
     except Exception as e:
-        logger.error(f"❌ TikTok yt-dlp улучшенный: {e}")
+        logger.error(f"❌ TikTok yt-dlp метаданные: {e}")
     
     return None, None
 
@@ -495,20 +471,20 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
         logger.info("✅ TikTok: загружено из кэша")
         return cached_result
 
-    # Пробуем все методы по очереди
+    # Пробуем только HTML парсинг и API (убираем yt-dlp для фото)
     methods = [
-        lambda: download_tiktok_photos_ytdlp_improved(url),
         lambda: download_tiktok_photos_html(url),
         lambda: download_tiktok_photos_api(url)
     ]
 
-    for method in methods:
+    for i, method in enumerate(methods, 1):
+        logger.info(f"TikTok: попытка метода {i}/{len(methods)}")
         result = await method()
         if result and result[0]:
             save_to_cache(cache_key, result)
             return result
 
-    return None, "❌ Не удалось скачать фото из TikTok всеми методами"
+    return None, "❌ Не удалось скачать фото из TikTok. Попробуйте другую ссылку."
 
 # === 📤 СКАЧИВАНИЕ ВИДЕО - МЕТОД 1 (yt-dlp стандартный) ===
 async def download_video_ytdlp(url: str, quality: str) -> Optional[str]:
