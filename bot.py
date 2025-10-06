@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import hashlib
+import json
 from pathlib import Path
 from typing import Optional, Tuple, List
 import aiohttp
@@ -296,40 +297,168 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
 
     return None, None, "❌ Не удалось скачать контент из Instagram всеми методами"
 
-# === 📤 СКАЧИВАНИЕ TIKTOK ФОТО - МЕТОД 1 (yt-dlp) ===
-async def download_tiktok_photos_ytdlp(url: str) -> Tuple[Optional[List[str]], Optional[str]]:
-    """Скачать фото из TikTok через yt-dlp"""
+# === 📤 НОВЫЙ МЕТОД: СКАЧИВАНИЕ TIKTOK ФОТО ЧЕРЕЗ yt-dlp С ПРАВИЛЬНЫМИ НАСТРОЙКАМИ ===
+async def download_tiktok_photos_ytdlp_improved(url: str) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Скачать фото из TikTok через yt-dlp с улучшенными настройками"""
     try:
-        logger.info("🔄 TikTok: попытка через yt-dlp...")
-        ydl_opts = get_ydl_opts()
+        logger.info("🔄 TikTok: попытка через yt-dlp (улучшенный метод)...")
+        
+        # Специальные настройки для TikTok фото
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.tiktok.com/'
+            }
+        }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-
-            if info.get('_type') == 'playlist' or 'entries' in info:
-                photos = []
-                for i, entry in enumerate(info.get('entries', [])):
-                    if i >= 30:
-                        break
+            
+            # Проверяем, есть ли изображения
+            if not info:
+                return None, None
+            
+            description = info.get('description', '') or info.get('title', 'Без описания')
+            photos = []
+            
+            # Случай 1: Несколько изображений (слайдшоу)
+            if 'entries' in info:
+                logger.info(f"TikTok: найдено {len(info['entries'])} изображений")
+                for i, entry in enumerate(info['entries'][:30]):  # Лимит 30 фото
+                    # Пробуем разные поля для URL изображения
+                    img_url = (entry.get('url') or 
+                              entry.get('thumbnail') or 
+                              entry.get('webpage_url'))
                     
-                    img_url = entry.get('thumbnail')
                     if img_url:
-                        img_path = os.path.join(tempfile.gettempdir(), f"tiktok_{entry.get('id', i)}.jpg")
+                        img_path = os.path.join(tempfile.gettempdir(), f"tiktok_{info.get('id', i)}_{i}.jpg")
+                        logger.info(f"Скачиваем изображение {i+1}: {img_url}")
                         if await download_file(img_url, img_path):
                             photos.append(img_path)
-
-                if photos:
-                    description = info.get('description', 'Без описания')
-                    logger.info("✅ TikTok: фото скачано через yt-dlp")
-                    return (photos, description)
+            
+            # Случай 2: Одно изображение
+            elif info.get('thumbnail'):
+                img_url = info['thumbnail']
+                img_path = os.path.join(tempfile.gettempdir(), f"tiktok_{info.get('id', 'single')}.jpg")
+                logger.info(f"Скачиваем одиночное изображение: {img_url}")
+                if await download_file(img_url, img_path):
+                    photos.append(img_path)
+            
+            if photos:
+                logger.info(f"✅ TikTok: скачано {len(photos)} фото через yt-dlp")
+                return (photos, description)
+            else:
+                logger.warning("TikTok: не удалось извлечь URL изображений")
 
     except Exception as e:
-        logger.error(f"❌ TikTok yt-dlp: {e}")
+        logger.error(f"❌ TikTok yt-dlp улучшенный: {e}")
     
     return None, None
 
-# === 📤 СКАЧИВАНИЕ TIKTOK ФОТО - МЕТОД 2 (API) ===
+# === 📤 СКАЧИВАНИЕ TIKTOK ФОТО - МЕТОД 2 (Прямой HTML парсинг) ===
+async def download_tiktok_photos_html(url: str) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Скачать фото из TikTok через парсинг HTML"""
+    try:
+        logger.info("🔄 TikTok: попытка через HTML парсинг...")
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://www.tiktok.com/'
+            }
+            
+            async with session.get(url, headers=headers, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    logger.error(f"TikTok HTML: статус {resp.status}")
+                    return None, None
+                
+                html = await resp.text()
+                
+                # Ищем JSON данные в HTML
+                json_patterns = [
+                    r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">(.*?)</script>',
+                    r'<script id="SIGI_STATE" type="application/json">(.*?)</script>',
+                    r'window\[\'SIGI_STATE\'\]\s*=\s*(\{.*?\});'
+                ]
+                
+                for pattern in json_patterns:
+                    json_match = re.search(pattern, html, re.DOTALL)
+                    if json_match:
+                        try:
+                            data = json.loads(json_match.group(1))
+                            logger.info("TikTok: JSON данные найдены")
+                            
+                            # Извлекаем изображения из разных возможных мест
+                            photos = []
+                            description = "Без описания"
+                            
+                            # Поиск в разных структурах данных
+                            def find_images(obj, path=""):
+                                """Рекурсивный поиск изображений в JSON"""
+                                if isinstance(obj, dict):
+                                    # Проверяем известные поля с изображениями
+                                    if 'imagePost' in obj and 'images' in obj['imagePost']:
+                                        return obj['imagePost']['images']
+                                    if 'images' in obj and isinstance(obj['images'], list):
+                                        return obj['images']
+                                    
+                                    # Рекурсивно ищем дальше
+                                    for key, value in obj.items():
+                                        result = find_images(value, f"{path}.{key}")
+                                        if result:
+                                            return result
+                                elif isinstance(obj, list):
+                                    for item in obj:
+                                        result = find_images(item, path)
+                                        if result:
+                                            return result
+                                return None
+                            
+                            images_data = find_images(data)
+                            
+                            if images_data:
+                                logger.info(f"TikTok: найдено {len(images_data)} изображений в JSON")
+                                for i, img_data in enumerate(images_data[:30]):
+                                    # Пробуем разные варианты URL
+                                    img_url = None
+                                    if isinstance(img_data, str):
+                                        img_url = img_data
+                                    elif isinstance(img_data, dict):
+                                        img_url = (img_data.get('imageURL') or 
+                                                  img_data.get('imageUrl') or
+                                                  img_data.get('url') or
+                                                  img_data.get('displayImage') or
+                                                  img_data.get('originUrl'))
+                                    
+                                    if img_url:
+                                        img_path = os.path.join(tempfile.gettempdir(), f"tiktok_html_{i}.jpg")
+                                        logger.info(f"Скачиваем изображение {i+1}: {img_url[:100]}...")
+                                        if await download_file(img_url, img_path):
+                                            photos.append(img_path)
+                                
+                                if photos:
+                                    logger.info(f"✅ TikTok: скачано {len(photos)} фото через HTML парсинг")
+                                    return (photos, description)
+                        
+                        except json.JSONDecodeError as e:
+                            logger.error(f"TikTok JSON decode error: {e}")
+                            continue
+                
+                logger.warning("TikTok: не удалось найти JSON данные в HTML")
+    
+    except Exception as e:
+        logger.error(f"❌ TikTok HTML парсинг: {e}")
+    
+    return None, None
+
+# === 📤 СКАЧИВАНИЕ TIKTOK ФОТО - МЕТОД 3 (API через сторонние сервисы) ===
 async def download_tiktok_photos_api(url: str) -> Tuple[Optional[List[str]], Optional[str]]:
-    """Скачать фото из TikTok через oembed API"""
+    """Скачать фото из TikTok через публичные API"""
     try:
         logger.info("🔄 TikTok: попытка через oembed API...")
         api_url = f"https://www.tiktok.com/oembed?url={url}"
@@ -340,63 +469,20 @@ async def download_tiktok_photos_api(url: str) -> Tuple[Optional[List[str]], Opt
                     data = await resp.json()
                     title = data.get('title', 'Без описания')
                     author = data.get('author_name', 'Неизвестный автор')
+                    thumbnail_url = data.get('thumbnail_url')
                     
-                    # Пытаемся получить изображения через yt-dlp
-                    ydl_opts = get_ydl_opts()
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        
-                        if info.get('_type') == 'playlist' or 'entries' in info:
-                            photos = []
-                            for i, entry in enumerate(info.get('entries', [])):
-                                if i >= 30:
-                                    break
-                                img_url = entry.get('thumbnail')
-                                if img_url:
-                                    img_path = os.path.join(tempfile.gettempdir(), f"tiktok_api_{i}.jpg")
-                                    if await download_file(img_url, img_path):
-                                        photos.append(img_path)
-                            
-                            if photos:
-                                description = f"{title} (@{author})"
-                                logger.info("✅ TikTok: фото скачано через API")
-                                return (photos, description)
+                    if thumbnail_url:
+                        # Это может быть превью видео, но попробуем
+                        photos = []
+                        img_path = os.path.join(tempfile.gettempdir(), f"tiktok_api_thumb.jpg")
+                        if await download_file(thumbnail_url, img_path):
+                            photos.append(img_path)
+                            description = f"{title} (@{author})"
+                            logger.info("✅ TikTok: превью скачано через API")
+                            return (photos, description)
 
     except Exception as e:
         logger.error(f"❌ TikTok API: {e}")
-    
-    return None, None
-
-# === 📤 СКАЧИВАНИЕ TIKTOK ФОТО - МЕТОД 3 (Прямой запрос) ===
-async def download_tiktok_photos_direct(url: str) -> Tuple[Optional[List[str]], Optional[str]]:
-    """Скачать фото из TikTok напрямую"""
-    try:
-        logger.info("🔄 TikTok: попытка через прямой запрос...")
-        
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': 'https://www.tiktok.com/'
-            }
-            
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    
-                    # Ищем JSON данные в HTML
-                    json_match = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">(.*?)</script>', html)
-                    if json_match:
-                        import json
-                        data = json.loads(json_match.group(1))
-                        
-                        # Извлекаем изображения
-                        photos = []
-                        # Логика извлечения может меняться в зависимости от структуры TikTok
-                        logger.info("✅ TikTok: данные получены через прямой запрос")
-                        # TODO: Добавить парсинг JSON для извлечения изображений
-                        
-    except Exception as e:
-        logger.error(f"❌ TikTok прямой запрос: {e}")
     
     return None, None
 
@@ -411,9 +497,9 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
 
     # Пробуем все методы по очереди
     methods = [
-        lambda: download_tiktok_photos_ytdlp(url),
-        lambda: download_tiktok_photos_api(url),
-        lambda: download_tiktok_photos_direct(url)
+        lambda: download_tiktok_photos_ytdlp_improved(url),
+        lambda: download_tiktok_photos_html(url),
+        lambda: download_tiktok_photos_api(url)
     ]
 
     for method in methods:
