@@ -5,6 +5,7 @@ import logging
 import re
 import hashlib
 import json
+import time  # <-- добавлено для корректной работы кэша
 from pathlib import Path
 from typing import Optional, Tuple, List
 import aiohttp
@@ -19,7 +20,9 @@ import yt_dlp
 import instaloader
 import pickle
 import sys
+
 sys.stdout.reconfigure(encoding='utf-8')
+
 # === 🧰 НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
     level=logging.INFO,
@@ -120,7 +123,7 @@ def load_from_cache(key: str) -> Optional[any]:
         cache_file = CACHE_DIR / f"{key}.pkl"
         if cache_file.exists():
             # Проверка на устаревание кэша
-            if (os.path.getmtime(cache_file) + CACHE_TTL) > asyncio.get_event_loop().time():
+            if (os.path.getmtime(cache_file) + CACHE_TTL) > time.time():  # <-- исправлено
                 with open(cache_file, 'rb') as f:
                     return pickle.load(f)
             else:
@@ -160,29 +163,23 @@ async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Opti
         post = instaloader.Post.from_shortcode(L.context, shortcode)
 
         if post.is_video:
-            # Видео
             video_url = post.video_url
             temp_path = os.path.join(tempfile.gettempdir(), f"insta_{shortcode}.mp4")
-            
             if await download_file(video_url, temp_path):
                 logger.info("✅ Instagram: видео скачано через Instaloader")
                 return (temp_path, None, None)
         else:
-            # Фото
             photos = []
             description = post.caption or "Без описания"
             
             if post.typename == "GraphSidecar":
-                # Галерея
                 for i, node in enumerate(post.get_sidecar_nodes()):
                     if node.is_video or i >= 10:
                         continue
-                    
                     photo_path = os.path.join(tempfile.gettempdir(), f"insta_{shortcode}_{i}.jpg")
                     if await download_file(node.display_url, photo_path):
                         photos.append(photo_path)
             else:
-                # Одиночное фото
                 photo_path = os.path.join(tempfile.gettempdir(), f"insta_{shortcode}.jpg")
                 if await download_file(post.url, photo_path):
                     photos.append(photo_path)
@@ -241,7 +238,6 @@ async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str
                         edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
                         
                         if edges:
-                            # Галерея
                             for i, edge in enumerate(edges[:10]):
                                 node = edge.get('node', {})
                                 img_url = node.get('display_url')
@@ -250,7 +246,6 @@ async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str
                                     if await download_file(img_url, photo_path):
                                         photos.append(photo_path)
                         else:
-                            # Одиночное фото
                             img_url = media.get('display_url')
                             if img_url:
                                 photo_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}.jpg")
@@ -276,14 +271,12 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         logger.info("✅ Instagram: загружено из кэша")
         return cached_result
 
-    # Извлекаем shortcode
     shortcode_match = re.search(r'/(?:p|reel)/([^/]+)', url)
     if not shortcode_match:
         return None, None, "❌ Не удалось извлечь shortcode из URL"
     
     shortcode = shortcode_match.group(1)
 
-    # Пробуем все методы по очереди
     methods = [
         lambda: download_instagram_instaloader(url, shortcode),
         lambda: download_instagram_ytdlp(url, quality),
@@ -309,12 +302,10 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
 
     try:
         logger.info("🔄 TikTok: парсинг фото...")
-        
-        # Очищаем URL от параметров
         clean_url = url.split('?')[0]
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Referer': 'https://www.tiktok.com/',
@@ -324,14 +315,12 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.get(clean_url, headers=headers, allow_redirects=True) as resp:
                 if resp.status != 200:
-                    logger.error(f"TikTok: статус {resp.status}")
                     return None, f"❌ TikTok вернул статус {resp.status}"
                 
                 html = await resp.text()
-                
                 photos = []
+                urls_found = set()
                 
-                # Ищем все img теги с imagePost
                 img_patterns = [
                     r'<img[^>]*?src="([^"]*imagePost[^"]*?)"',
                     r'srcSet="([^"]*imagePost[^"]*?)"',
@@ -341,32 +330,24 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
                     r'<img[^>]*?data-src="(https://[^"]*\.jpg)"'
                 ]
                 
-                urls_found = set()
-                
                 for pattern in img_patterns:
                     matches = re.finditer(pattern, html, re.DOTALL)
                     for match in matches:
                         raw_url = match.group(1)
-                        
-                        # Парсим JSON если нужно
                         if '[' in raw_url or '{' in raw_url:
                             json_matches = re.findall(r'"([https://][^"]*\.jpg)"', raw_url)
                             for url_str in json_matches:
                                 urls_found.add(url_str)
                         else:
-                            # Очищаем URL
                             url_str = raw_url.replace(r'\/', '/').split('?')[0]
                             if url_str.startswith('http') and '.jpg' in url_str.lower():
                                 urls_found.add(url_str)
                 
                 logger.info(f"TikTok: найдено {len(urls_found)} URL изображений")
                 
-                # Скачиваем найденные фото
-                for i, img_url in enumerate(list(urls_found)[:10]):  # Лимит 10 фото
+                for i, img_url in enumerate(list(urls_found)[:10]):
                     try:
                         img_path = os.path.join(tempfile.gettempdir(), f"tiktok_photo_{i}.jpg")
-                        logger.info(f"Скачиваем фото {i+1}: {img_url[:80]}...")
-                        
                         if await download_file(img_url, img_path, timeout=15):
                             photos.append(img_path)
                             logger.info(f"✅ Фото {i+1} скачано")
@@ -380,19 +361,16 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
                     save_to_cache(cache_key, result)
                     return result
                 else:
-                    logger.warning("TikTok: не найдены URL изображений в HTML")
                     return None, "❌ Не удалось найти фото на странице"
     
     except asyncio.TimeoutError:
-        logger.error("TikTok: timeout")
         return None, "❌ Истёк timeout при подключении к TikTok"
     except Exception as e:
         logger.error(f"❌ TikTok парсинг: {e}")
         return None, f"❌ Ошибка: {str(e)[:50]}"
 
-# === 📤 СКАЧИВАНИЕ ВИДЕО - МЕТОД 1 (yt-dlp стандартный) ===
+# === 📤 СКАЧИВАНИЕ ВИДЕО - МЕТОДЫ ===
 async def download_video_ytdlp(url: str, quality: str) -> Optional[str]:
-    """Скачать видео через yt-dlp"""
     try:
         logger.info("🔄 Видео: попытка через yt-dlp...")
         ydl_opts = get_ydl_opts(quality)
@@ -404,12 +382,9 @@ async def download_video_ytdlp(url: str, quality: str) -> Optional[str]:
                 return temp_file
     except Exception as e:
         logger.error(f"❌ yt-dlp стандартный: {e}")
-    
     return None
 
-# === 📤 СКАЧИВАНИЕ ВИДЕО - МЕТОД 2 (yt-dlp с cookies) ===
 async def download_video_ytdlp_cookies(url: str, quality: str) -> Optional[str]:
-    """Скачать видео через yt-dlp с cookies"""
     try:
         logger.info("🔄 Видео: попытка через yt-dlp с cookies...")
         cookies_file = Path("cookies.txt")
@@ -427,12 +402,9 @@ async def download_video_ytdlp_cookies(url: str, quality: str) -> Optional[str]:
                 return temp_file
     except Exception as e:
         logger.error(f"❌ yt-dlp с cookies: {e}")
-    
     return None
 
-# === 📤 СКАЧИВАНИЕ ВИДЕО - МЕТОД 3 (yt-dlp альтернативный формат) ===
 async def download_video_ytdlp_alt(url: str) -> Optional[str]:
-    """Скачать видео через yt-dlp с альтернативными настройками"""
     try:
         logger.info("🔄 Видео: попытка через yt-dlp (альтернативный формат)...")
         ydl_opts = {
@@ -441,7 +413,6 @@ async def download_video_ytdlp_alt(url: str) -> Optional[str]:
             'quiet': True,
             'no_warnings': True
         }
-        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
@@ -450,45 +421,31 @@ async def download_video_ytdlp_alt(url: str) -> Optional[str]:
                 return temp_file
     except Exception as e:
         logger.error(f"❌ yt-dlp альтернативный: {e}")
-    
     return None
 
-# === 📤 ГЛАВНАЯ ФУНКЦИЯ СКАЧИВАНИЯ ВИДЕО ===
 async def download_video(url: str, quality: str = "best") -> Optional[str]:
-    """Скачать видео (пробует все методы)"""
     methods = [
         lambda: download_video_ytdlp(url, quality),
         lambda: download_video_ytdlp_cookies(url, quality),
         lambda: download_video_ytdlp_alt(url)
     ]
-
     for method in methods:
         result = await method()
         if result:
             return result
-
     return None
 
-# === 📤 ОТПРАВКА ФОТО С ОПИСАНИЕМ ===
+# === 📤 ОТПРАВКА ФОТО ===
 async def send_photos_with_caption(chat_id: int, photos: List[str], caption: str) -> bool:
-    """Отправить фото с описанием"""
     if not photos:
         return False
-
     try:
         if len(photos) == 1:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=FSInputFile(photos[0]),
-                caption=caption
-            )
+            await bot.send_photo(chat_id=chat_id, photo=FSInputFile(photos[0]), caption=caption)
         else:
             media_group = [
-                types.InputMediaPhoto(
-                    media=FSInputFile(photo),
-                    caption=caption if i == 0 else None
-                )
-                for i, photo in enumerate(photos[:10])  # Telegram лимит 10 фото
+                types.InputMediaPhoto(media=FSInputFile(photo), caption=caption if i == 0 else None)
+                for i, photo in enumerate(photos[:10])
             ]
             await bot.send_media_group(chat_id=chat_id, media=media_group)
         return True
@@ -497,18 +454,18 @@ async def send_photos_with_caption(chat_id: int, photos: List[str], caption: str
         return False
 
 # === 📤 ЗАГРУЗКА НА ФАЙЛООБМЕННИКИ ===
+
 async def upload_to_filebin(file_path: str) -> Optional[str]:
-    """Загрузить файл на filebin.net"""
     try:
         logger.info("🔄 Загрузка на filebin.net...")
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file', f, filename=Path(file_path).name)
-                async with session.post('https://filebin.net/', data=data, params={'expiry': '3d'}) as resp:
+                async with session.post('https://filebin.net/', data=data, params={'expiry': '3d'}) as resp:  # <-- пробел убран
                     if resp.status == 200:
                         text = await resp.text()
-                        match = re.search(r'https://filebin\.net/[^"\s<>\)]+', text)
+                        match = re.search(r'https://filebin\.net/[a-zA-Z0-9]+/[^"\s<>\)]+', text)
                         if match:
                             logger.info("✅ Загружено на filebin.net")
                             return match.group(0)
@@ -517,92 +474,89 @@ async def upload_to_filebin(file_path: str) -> Optional[str]:
     return None
 
 async def upload_to_gofile(file_path: str) -> Optional[str]:
-    """Загрузить файл на gofile.io"""
+    """Загрузить файл на gofile.io (до 10 ГБ)"""
     try:
         logger.info("🔄 Загрузка на gofile.io...")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:  # увеличено до 5 мин
             # Получаем сервер
-            async with session.get('https://api.gofile.io/getServer') as resp:
-                if resp.status == 200:
-                    server_data = await resp.json()
-                    server = server_data.get('data', {}).get('server', 'store1')
-                    
-                    # Загружаем файл
-                    with open(file_path, 'rb') as f:
-                        data = aiohttp.FormData()
-                        data.add_field('file', f, filename=Path(file_path).name)
-                        upload_url = f'https://{server}.gofile.io/uploadFile'
-                        async with session.post(upload_url, data=data) as upload_resp:
-                            if upload_resp.status == 200:
-                                result = await upload_resp.json()
-                                if result.get('status') == 'ok':
-                                    logger.info("✅ Загружено на gofile.io")
-                                    return result['data']['downloadPage']
+            async with session.get('https://api.gofile.io/servers') as resp:
+                if resp.status != 200:
+                    logger.error(f"gofile.io: не удалось получить сервер, статус {resp.status}")
+                    return None
+                server_data = await resp.json()
+                if not server_data.get('data', {}).get('servers'):
+                    logger.error("gofile.io: нет доступных серверов")
+                    return None
+                # Берём первый сервер
+                server = server_data['data']['servers'][0]['name']
+                logger.info(f"Выбран сервер gofile: {server}")
+
+            # Загружаем файл
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('file', f, filename=Path(file_path).name)
+                upload_url = f'https://{server}.gofile.io/contents/uploadfile'
+                async with session.post(upload_url, data=data) as upload_resp:
+                    logger.info(f"gofile.io: статус загрузки {upload_resp.status}")
+                    if upload_resp.status == 200:
+                        result = await upload_resp.json()
+                        if result.get('status') == 'ok':
+                            download_page = result['data']['downloadPage']
+                            logger.info(f"✅ Загружено на gofile.io: {download_page}")
+                            return download_page
+                        else:
+                            logger.error(f"gofile.io: ошибка в ответе: {result}")
+                    else:
+                        text = await upload_resp.text()
+                        logger.error(f"gofile.io: HTTP {upload_resp.status}, тело: {text[:200]}")
+    except asyncio.TimeoutError:
+        logger.error("❌ gofile.io: таймаут при загрузке (файл слишком большой или медленный интернет)")
     except Exception as e:
         logger.error(f"❌ gofile.io: {e}")
     return None
 
-async def upload_to_tmpfiles(file_path: str) -> Optional[str]:
-    """Загрузить файл на tmpfiles.org"""
+async def upload_to_oshi(file_path: str) -> Optional[str]:
+    """Загрузить файл на oshi.at (до 5 ГБ, 30 дней)"""
     try:
-        logger.info("🔄 Загрузка на tmpfiles.org...")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        logger.info("🔄 Загрузка на oshi.at...")
+        # Отключаем SSL-проверку ТОЛЬКО для этого хоста (из-за их самоподписанного сертификата)
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=180)
+        ) as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file', f, filename=Path(file_path).name)
-                async with session.post('https://tmpfiles.org/api/v1/upload', data=data) as resp:
+                async with session.post('https://oshi.at/', data=data) as resp:
                     if resp.status == 200:
-                        result = await resp.json()
-                        url = result.get('data', {}).get('url', '')
-                        if url:
-                            logger.info("✅ Загружено на tmpfiles.org")
-                            return url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+                        text = await resp.text()
+                        lines = text.strip().split('\n')
+                        if lines:
+                            url = lines[0].strip()
+                            if url.startswith('http'):
+                                logger.info("✅ Загружено на oshi.at")
+                                return url
     except Exception as e:
-        logger.error(f"❌ tmpfiles.org: {e}")
-    return None
-
-async def upload_to_pixeldrain(file_path: str) -> Optional[str]:
-    """Загрузить файл на pixeldrain.com"""
-    try:
-        logger.info("🔄 Загрузка на pixeldrain.com...")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
-            with open(file_path, 'rb') as f:
-                data = aiohttp.FormData()
-                data.add_field('file', f, filename=Path(file_path).name)
-                async with session.post('https://pixeldrain.com/api/file', data=data) as resp:
-                    if resp.status == 201:
-                        result = await resp.json()
-                        file_id = result.get('id')
-                        if file_id:
-                            logger.info("✅ Загружено на pixeldrain.com")
-                            return f'https://pixeldrain.com/u/{file_id}'
-    except Exception as e:
-        logger.error(f"❌ pixeldrain.com: {e}")
+        logger.error(f"❌ oshi.at: {e}")
     return None
 
 async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") -> bool:
-    """Отправить видео или ссылку на скачивание"""
     file_size = Path(file_path).stat().st_size
     size_mb = file_size / (1024 * 1024)
 
-    # Telegram лимит 50 МБ
     if size_mb <= 50:
         try:
-            await bot.send_video(
-                chat_id=chat_id,
-                video=FSInputFile(file_path),
-                caption=caption
-            )
+            await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), caption=caption)
             return True
         except TelegramBadRequest as e:
             logger.error(f"Ошибка отправки видео в Telegram: {e}")
 
-    # Пробуем файлообменники по очереди
+    # Только рабочие файлообменники
     uploaders = [
         ('filebin.net', upload_to_filebin),
         ('gofile.io', upload_to_gofile),
-        ('tmpfiles.org', upload_to_tmpfiles),
-        ('pixeldrain.com', upload_to_pixeldrain)
+        ('oshi.at', upload_to_oshi)
     ]
 
     for name, uploader in uploaders:
@@ -613,28 +567,25 @@ async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") ->
                 chat_id=chat_id,
                 text=f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n"
                      f"📥 Скачать: {link}\n\n"
-                     f"⏱️ Ссылка действительна 3 дня"
+                     f"⏱️ Ссылка действительна несколько дней"
             )
             return True
 
-    # Все попытки неудачны
     await bot.send_message(
         chat_id=chat_id,
         text=f"❌ Файл слишком большой ({size_mb:.1f} МБ).\n"
-             f"Временно недоступны сервисы загрузки."
+             f"Все сервисы загрузки временно недоступны."
     )
     return False
 
 # === 🧭 КЛАВИАТУРЫ ===
 def main_keyboard() -> ReplyKeyboardMarkup:
-    """Главная клавиатура"""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
         resize_keyboard=True
     )
 
 def settings_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура настроек"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🌟 Лучшее")],
@@ -648,7 +599,6 @@ def settings_keyboard() -> ReplyKeyboardMarkup:
 # === 🚀 КОМАНДЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    """Обработка команды /start"""
     await state.clear()
     welcome_text = (
         "🎬 <b>Добро пожаловать в VideoBot!</b>\n\n"
@@ -662,7 +612,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "⚙️ Настройки")
 async def settings_menu(message: types.Message, state: FSMContext):
-    """Меню настроек"""
     await state.set_state(VideoStates.choosing_quality)
     current = get_quality_setting(message.from_user.id)
     await message.answer(
@@ -675,7 +624,6 @@ async def settings_menu(message: types.Message, state: FSMContext):
     "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p"
 ]))
 async def set_quality(message: types.Message, state: FSMContext):
-    """Установка качества видео"""
     quality_map = {
         "🌟 Лучшее": "best",
         "🎬 1080p": "1080p",
@@ -693,14 +641,12 @@ async def set_quality(message: types.Message, state: FSMContext):
 
 @dp.message(VideoStates.choosing_quality, F.text == "◀️ Назад")
 async def back_to_main(message: types.Message, state: FSMContext):
-    """Вернуться в главное меню"""
     await state.clear()
     await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
 
 # === 📥 ОБРАБОТКА ССЫЛОК ===
 @dp.message(F.text)
 async def handle_link(message: types.Message):
-    """Обработка ссылок на видео"""
     url = message.text.strip()
     
     if not is_valid_url(url):
@@ -717,25 +663,19 @@ async def handle_link(message: types.Message):
     temp_photos = []
 
     try:
-        # Instagram
         if platform == 'instagram':
             temp_file, photos, description = await download_instagram(url, user_quality)
-            
             if description and "❌" in description:
                 await status_msg.edit_text(description)
                 return
-
             if photos:
                 temp_photos = photos
                 await status_msg.delete()
                 await send_photos_with_caption(message.chat.id, photos, description)
                 return
 
-        # TikTok фото - ПРОВЕРЯЕМ ПЕРЕД ВИДЕО
         if platform == 'tiktok' and '/photo/' in url:
-            logger.info("🔄 TikTok: обнаружено фото, скачиваю...")
             photos, description = await download_tiktok_photos(url)
-            
             if photos:
                 temp_photos = photos
                 await status_msg.delete()
@@ -745,10 +685,7 @@ async def handle_link(message: types.Message):
                 await status_msg.edit_text(description)
                 return
 
-        # Видео (YouTube, TikTok видео, Instagram видео)
-        logger.info("🔄 Видео: обнаружено видео, скачиваю...")
         temp_file = await download_video(url, user_quality)
-
         if not temp_file or not os.path.exists(temp_file):
             await status_msg.edit_text("❌ Не удалось скачать видео всеми доступными методами")
             return
@@ -766,7 +703,6 @@ async def handle_link(message: types.Message):
             pass
     
     finally:
-        # Очистка временных файлов
         if temp_file and os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
@@ -780,9 +716,9 @@ async def handle_link(message: types.Message):
                     os.remove(photo)
             except Exception as e:
                 logger.warning(f"Не удалось удалить фото {photo}: {e}")
+
 # === 🏁 ЗАПУСК ===
 async def main():
-    """Главная функция запуска бота"""
     logger.info("🚀 Запуск бота...")
     try:
         await dp.start_polling(bot, skip_updates=True)
