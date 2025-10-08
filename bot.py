@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from dotenv import load_dotenv
@@ -48,10 +48,13 @@ dp = Dispatcher()
 # === 🧠 ХРАНИЛИЩЕ НАСТРОЕК ===
 user_settings = {}
 RATE_LIMIT_DELAY = {}  # {user_id: last_request_time}
+# --- 🆕 ХРАНИЛИЩЕ ДЛЯ ОЖИДАНИЯ ДРУГОЙ ССЫЛКИ ---
+user_upload_info = {} # {user_id: {'file_path': str, 'original_message_id': int, 'original_caption': str}}
 
 # === 🎨 СОСТОЯНИЯ FSM ===
 class VideoStates(StatesGroup):
     choosing_quality = State()
+    waiting_for_another_link = State() # <--- Новое состояние
 
 # === 📺 КАЧЕСТВА ВИДЕО ===
 QUALITY_FORMATS = {
@@ -138,8 +141,6 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
     except Exception as e:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
-
-# ... (ваши текущие импорты и настройки остаются без изменений) ...
 
 # === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ ===
 
@@ -252,7 +253,7 @@ async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Opti
         # Используем cookies, если они есть
         cookies_file = Path("cookies.txt")
         if cookies_file.exists():
-            L.load_session_from_file("your_username_or_session_name", str(cookies_file)) # Замените на реальный username или укажите файл сессии
+            # L.load_session_from_file("your_username_or_session_name", str(cookies_file)) # Замените на реальный username или укажите файл сессии
             logger.info("✅ Используется сессия из cookies.txt (Instaloader)")
 
         post = instaloader.Post.from_shortcode(L.context, shortcode)
@@ -440,9 +441,6 @@ async def get_video_url_from_ssstik(url: str) -> Optional[str]:
             # Ищем ссылку на видео
             # ssstik обычно предоставляет ссылку в элементе <a> с data-url или href
             # или через JS в атрибутах кнопки
-            # Примеры:
-            # <a href="https://..." download="">Download HD</a>
-            # <button data-url="https://...">
             # Ссылка может быть в JSON внутри скрипта
             # Это хрупко, но пробуем
             # Часто ссылка на видео без звука и с отдельной ссылкой на аудио
@@ -469,7 +467,7 @@ async def get_video_url_from_ttdownloader(url: str) -> Optional[str]:
     """Получает ссылку на видео с ttdownloader.com"""
     # ttdownloader.com часто использует POST-запрос к /api/ajax/search
     # и возвращает JSON с результатами
-    # Пример: POST /api/ajax/search с data: { query: url, lang: 'en' }
+    # Пример: POST /api/ajax/search с  { query: url, lang: 'en' }
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -548,7 +546,7 @@ async def get_video_url_from_snaptik(url: str) -> Optional[str]:
                          return final_url
                     # Или снова получаем HTML и ищем ссылку
                     dl_html = await dl_resp.text()
-                    dl_link_match = re.search(r'<a[^>]+href="(https?://[^"]+\.mp4[^"]*)"', dl_html)
+                    dl_link_match = re.search(r'<a[^>]+href="(https?://[^"]*\.mp4[^"]*)"', dl_html)
                     if dl_link_match:
                         return dl_link_match.group(1)
 
@@ -786,7 +784,40 @@ async def upload_to_gofile(file_path: str) -> Optional[str]:
         logger.error(f"❌ gofile.io: {e}")
     return None
 
-async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") -> bool:
+# --- 🚫 УДАЛИТЬ ЭТОТ БЛОК ---
+# async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") -> bool:
+#     file_size = Path(file_path).stat().st_size
+#     size_mb = file_size / (1024 * 1024)
+#
+#     if size_mb <= 50:
+#         try:
+#             await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), caption=caption)
+#             logger.info(f"✅ Видео ({size_mb:.1f} МБ) отправлено в Telegram")
+#             return True
+#         except TelegramBadRequest as e:
+#             logger.error(f"Ошибка отправки видео: {e}")
+#
+#     uploaders = [
+#         ('gofile.io', upload_to_gofile),
+#         ('filebin.net', upload_to_filebin),
+#     ]
+#
+#     for name, uploader in uploaders:
+#         link = await uploader(file_path)
+#         if link:
+#             await bot.send_message(
+#                 chat_id=chat_id,
+#                 text=f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней"
+#             )
+#             return True
+#
+#     await bot.send_message(
+#         chat_id=chat_id,
+#         text=f"❌ Файл слишком большой ({size_mb:.1f} МБ).\nВсе сервисы загрузки недоступны."
+#     )
+#     return False
+# --- 🆕 НОВЫЙ КОД ---
+async def send_video_or_link(chat_id: int, file_path: str, caption: str = "", state: FSMContext = None) -> bool:
     file_size = Path(file_path).stat().st_size
     size_mb = file_size / (1024 * 1024)
 
@@ -806,10 +837,20 @@ async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") ->
     for name, uploader in uploaders:
         link = await uploader(file_path)
         if link:
-            await bot.send_message(
+            sent_message = await bot.send_message(
                 chat_id=chat_id,
-                text=f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней"
+                text=f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней",
+                reply_markup=get_another_link_kb() # <--- Отправляем кнопку
             )
+            # --- 🆕 Сохраняем информацию для обработки кнопки ---
+            user_upload_info[chat_id] = {
+                'file_path': file_path,
+                'original_message_id': sent_message.message_id,
+                'original_caption': f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней"
+            }
+            if state:
+                await state.set_state(VideoStates.waiting_for_another_link)
+            logger.info(f"✅ Отправлена ссылка с кнопкой 'Другой файлообменник' через {name}")
             return True
 
     await bot.send_message(
@@ -886,7 +927,7 @@ async def back_to_main(message: types.Message, state: FSMContext):
 
 # === 📥 ОБРАБОТКА ССЫЛОК ===
 @dp.message(F.text)
-async def handle_link(message: types.Message):
+async def handle_link(message: types.Message, state: FSMContext):
     url = message.text.strip()
     if not is_valid_url(url):
         await message.answer("⚠️ Отправьте корректную ссылку на YouTube, TikTok или Instagram")
@@ -934,7 +975,7 @@ async def handle_link(message: types.Message):
             return
 
         await status_msg.edit_text("📤 Отправляю...")
-        await send_video_or_link(message.chat.id, temp_file,)
+        await send_video_or_link(message.chat.id, temp_file, caption="🎥 Готово!", state=state) # <--- Передаем state
         await status_msg.delete()
         
         # 🧹 АВТООЧИСТКА после отправки
@@ -955,10 +996,83 @@ async def handle_link(message: types.Message):
         if temp_photos:
             cleanup_files(temp_photos)
 
+# --- 🆕 НОВЫЙ КОД ---
+from aiogram import Router
+router = Router() # Создаем отдельный роутер для callback_query
+
+def get_another_link_kb() -> InlineKeyboardMarkup:
+    """Создает инлайн-кнопку 'Другой файлообменник'."""
+    kb = [
+        [InlineKeyboardButton(text="🔄 Другой файлообменник", callback_data="another_link")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+@router.callback_query(F.data == "another_link", VideoStates.waiting_for_another_link)
+async def on_another_link_click(call: types.CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    info = user_upload_info.get(user_id)
+
+    if not info:
+        await call.answer("❌ Информация устарела или отсутствует.", show_alert=True)
+        return
+
+    file_path = info['file_path']
+    original_message_id = info['original_message_id']
+
+    # Удаляем предыдущее сообщение с кнопкой
+    try:
+        await bot.delete_message(chat_id=user_id, message_id=original_message_id)
+    except TelegramBadRequest:
+        # Сообщение могло быть удалено вручную или просрочено
+        logger.warning(f"Не удалось удалить сообщение {original_message_id} у пользователя {user_id}")
+
+    # Определяем, какой сервис уже использовался, и выбираем другой
+    used_service = "gofile.io" if "gofile.io" in info['original_caption'] else "filebin.net" if "filebin.net" in info['original_caption'] else None
+
+    # Выбираем другой сервис
+    alternative_uploaders = {
+        'gofile.io': ('filebin.net', upload_to_filebin),
+        'filebin.net': ('gofile.io', upload_to_gofile),
+    }
+
+    if used_service in alternative_uploaders:
+        alt_name, alt_uploader = alternative_uploaders[used_service]
+        logger.info(f"🔄 Попытка загрузки на альтернативный сервис: {alt_name}")
+        alt_link = await alt_uploader(file_path)
+        if alt_link:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"📦 Альтернативная ссылка (через {alt_name}):\n\n📥 Скачать: {alt_link}\n\n⏱️ Ссылка действительна несколько дней"
+            )
+            logger.info(f"✅ Альтернативная ссылка через {alt_name} отправлена пользователю {user_id}")
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text="❌ Не удалось получить альтернативную ссылку. Извините за неудобства."
+            )
+            logger.warning(f"❌ Не удалось получить альтернативную ссылку через {alt_name} для пользователя {user_id}")
+    else:
+        # Если не удалось определить использованный сервис (маловероятно)
+        await bot.send_message(
+            chat_id=user_id,
+            text="❌ Не удалось определить альтернативный сервис. Извините за неудобства."
+        )
+        logger.error(f"Не удалось определить использованный сервис для альтернативной загрузки у пользователя {user_id}")
+
+    # Очищаем информацию и состояние
+    user_upload_info.pop(user_id, None)
+    await state.clear()
+
+    # Отвечаем на callback, чтобы убрать "часики" в Telegram
+    await call.answer()
+
 # === 🚀 ЗАПУСК: ГИБКИЙ РЕЖИМ ===
 async def main():
     logger.info("🚀 Запуск бота...")
-    
+
+    # --- 🆕 Регистрируем роутер для callback_query ---
+    dp.include_router(router)
+
     if WEBHOOK_HOST:
         # === Режим Webhook (для Railway) ===
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
