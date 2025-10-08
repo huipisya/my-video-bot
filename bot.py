@@ -140,6 +140,7 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
     return False
 
 # === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ ===
+
 async def download_instagram_embedder(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """Метод через публичный эмбед Instagram"""
     try:
@@ -307,19 +308,84 @@ async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str
         logger.error(f"❌ Instagram API: {e}")
     return None, None, None
 
+# --- 🆕 НОВЫЙ МЕТОД ДЛЯ REELS ---
+async def download_instagram_reels_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """Надежный метод для скачивания Reels через yt-dlp с эмуляцией мобильного устройства."""
+    try:
+        logger.info("🔄 Instagram Reels: попытка через yt-dlp (мобильный режим)...")
+
+        # Попробуем получить shortcode из /share/ URL
+        share_match = re.search(r'/share/([^/]+)', url)
+        if share_match:
+            shortcode = share_match.group(1)
+            # Составляем правильный URL для рилса
+            reel_url = f"https://www.instagram.com/reel/{shortcode}/"
+            logger.info(f"🔄 Переведен URL /share/ в /reel/: {reel_url}")
+        else:
+            # Если это не /share/, используем исходный URL
+            reel_url = url
+
+        ydl_opts = {
+            'format': 'best',
+            'noplaylist': True,
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                'Referer': 'https://www.instagram.com/',
+                'Origin': 'https://www.instagram.com',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+            # Добавим опцию для работы с Reels
+            'extractor_args': {
+                'instagram': {
+                    'skip_download': False
+                }
+            }
+        }
+
+        # Если есть cookies.txt, используем их
+        cookies_file = Path("cookies.txt")
+        if cookies_file.exists():
+            ydl_opts['cookiefile'] = str(cookies_file)
+            logger.info("✅ Используются куки из cookies.txt")
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(reel_url, download=True)
+            temp_file = ydl.prepare_filename(info)
+            if temp_file and os.path.exists(temp_file):
+                return (temp_file, None, None)
+
+    except Exception as e:
+        logger.error(f"❌ Instagram Reels yt-dlp: {e}")
+    return None, None, None
+
+# --- 🆕 ИСПРАВЛЕННАЯ ФУНКЦИЯ download_instagram ---
 async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    shortcode_match = re.search(r'/(?:p|reel)/([^/]+)', url)
+    # Исправленное извлечение shortcode (учитывает /share/)
+    shortcode_match = re.search(r'/(?:p|reel|share)/([^/]+)', url)
     if not shortcode_match:
         return None, None, "❌ Не удалось извлечь shortcode из URL"
     shortcode = shortcode_match.group(1)
 
-    methods = [
+    # Определяем тип контента по URL
+    is_reel = '/reel/' in url.lower() or '/share/' in url.lower()
+
+    methods = []
+
+    # Для Reels: сначала пробуем специальный метод
+    if is_reel:
+        methods.append(lambda: download_instagram_reels_ytdlp(url, quality))
+
+    # Затем остальные методы
+    methods.extend([
         lambda: download_instagram_embedder(url, shortcode),
         lambda: download_instagram_oembed(url),
         lambda: download_instagram_ytdlp(url, quality),
         lambda: download_instagram_instaloader(url, shortcode),
         lambda: download_instagram_api(url, shortcode)
-    ]
+    ])
 
     for method in methods:
         result = await method()
