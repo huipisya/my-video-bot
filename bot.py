@@ -48,9 +48,8 @@ dp = Dispatcher()
 # === 🧠 ХРАНИЛИЩЕ НАСТРОЕК ===
 user_settings = {}
 RATE_LIMIT_DELAY = {}  # {user_id: last_request_time}
-# --- 🆕 ХРАНИЛИЩЕ ДЛЯ ОЖИДАНИЯ ДРУГОЙ ССЫЛКИ ---
-user_upload_info = {} # {user_id: {'file_path': str, 'original_message_id': int, 'original_caption': str}}
-
+# --- 🆕 ХРАНИЛИЩЕ ДЛЯ ОЖИДАНИЯ ДРУГОЙ ССЫЛКИ И СООБЩЕНИЯ О ЗАГРУЗКЕ ---
+user_upload_info = {} # {user_id: {'file_path': str, 'original_message_id': int, 'original_caption': str, 'waiting_message_id': int}}
 # === 🎨 СОСТОЯНИЯ FSM ===
 class VideoStates(StatesGroup):
     choosing_quality = State()
@@ -844,10 +843,10 @@ async def send_video_or_link(chat_id: int, file_path: str, caption: str = "", st
             )
             # --- 🆕 Сохраняем информацию для обработки кнопки ---
             user_upload_info[chat_id] = {
-                'file_path': file_path,
-                'original_message_id': sent_message.message_id,
-                'original_caption': f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней"
-            }
+    'file_path': file_path,
+    'original_message_id': sent_message.message_id,
+    'original_caption': f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней"
+}
             if state:
                 await state.set_state(VideoStates.waiting_for_another_link)
             logger.info(f"✅ Отправлена ссылка с кнопкой 'Другой файлообменник' через {name}")
