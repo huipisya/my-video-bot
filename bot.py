@@ -166,7 +166,16 @@ async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Opti
 async def download_instagram_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     try:
         logger.info("🔄 Instagram: попытка через yt-dlp...")
-        ydl_opts = get_ydl_opts(quality)
+        ydl_opts = {
+            'format': 'best',  # Не мержим
+            'noplaylist': True,
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
