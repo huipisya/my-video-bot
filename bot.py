@@ -934,7 +934,7 @@ async def handle_link(message: types.Message):
             return
 
         await status_msg.edit_text("📤 Отправляю...")
-        await send_video_or_link(message.chat.id, temp_file, caption="🎥 Готово!")
+        await send_video_or_link(message.chat.id, temp_file,)
         await status_msg.delete()
         
         # 🧹 АВТООЧИСТКА после отправки
