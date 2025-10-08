@@ -34,20 +34,20 @@ logger = logging.getLogger(__name__)
 # === 🔐 ТОКЕН И WEBHOOK ===
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # Например: https://your-bot.up.railway.app
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не найден в переменных окружения")
 
-
 WEBHOOK_PATH = "/"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # === 🧠 ХРАНИЛИЩЕ НАСТРОЕК ===
 user_settings = {}
+RATE_LIMIT_DELAY = {}  # {user_id: last_request_time}
 
 # === 🎨 СОСТОЯНИЯ FSM ===
 class VideoStates(StatesGroup):
@@ -62,15 +62,25 @@ QUALITY_FORMATS = {
     "360p": 'best[height<=360][ext=mp4]/best[ext=mp4]/best'
 }
 
-# === 🧺 КЭШ — ОТКЛЮЧЁН ДЛЯ RAILWAY ===
-CACHE_TTL = 0  # файлы не кэшируются между перезапусками
+# === 🧺 КЭШ ===
+CACHE_TTL = 0
 
 # === 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+async def check_rate_limit(user_id: int):
+    """Ограничение: 1 запрос в 3 секунды"""
+    now = time.time()
+    last_time = RATE_LIMIT_DELAY.get(user_id, 0)
+    if now - last_time < 3:
+        delay = 3 - (now - last_time)
+        logger.info(f"⏱️ Rate limit для user {user_id}: ждём {delay:.1f}с")
+        await asyncio.sleep(delay)
+    RATE_LIMIT_DELAY[user_id] = time.time()
+
 def get_quality_setting(user_id: int) -> str:
     return user_settings.get(user_id, "best")
 
 def get_ydl_opts(quality: str = "best") -> dict:
-    return {
+    opts = {
         'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
         'merge_output_format': 'mp4',
         'noplaylist': True,
@@ -81,6 +91,10 @@ def get_ydl_opts(quality: str = "best") -> dict:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
     }
+    proxy = os.getenv("PROXY_URL")
+    if proxy:
+        opts['proxy'] = proxy
+    return opts
 
 def is_valid_url(url: str) -> bool:
     regex = re.compile(
@@ -104,11 +118,9 @@ def get_cache_key(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 def load_from_cache(key: str):
-    # Кэш отключён — всегда возвращаем None
     return None
 
 def save_to_cache(key: str, data):
-    # Ничего не сохраняем
     pass
 
 async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
@@ -124,7 +136,96 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
-# === 📥 INSTAGRAM: ВСЕ 3 МЕТОДА СОХРАНЕНЫ ===
+# === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ ===
+async def download_instagram_embedder(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """Метод через публичный эмбед Instagram"""
+    try:
+        logger.info("🔄 Instagram: попытка через Embed...")
+        embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.instagram.com/',
+            }
+            
+            async with session.get(embed_url, headers=headers) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    
+                    # Ищем video_url в HTML
+                    video_match = re.search(r'"video_url":"([^"]+)"', html)
+                    if video_match:
+                        video_url = video_match.group(1).replace('\\u0026', '&')
+                        temp_path = os.path.join(tempfile.gettempdir(), f"insta_embed_{shortcode}.mp4")
+                        if await download_file(video_url, temp_path):
+                            return (temp_path, None, None)
+                    
+                    # Ищем display_url для фото
+                    image_match = re.search(r'"display_url":"([^"]+)"', html)
+                    if image_match:
+                        image_url = image_match.group(1).replace('\\u0026', '&')
+                        photo_path = os.path.join(tempfile.gettempdir(), f"insta_embed_{shortcode}.jpg")
+                        if await download_file(image_url, photo_path):
+                            return (None, [photo_path], "📸 Instagram")
+    except Exception as e:
+        logger.error(f"❌ Instagram Embed: {e}")
+    return None, None, None
+
+async def download_instagram_oembed(url: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """Метод через официальный oEmbed API"""
+    try:
+        logger.info("🔄 Instagram: попытка через oEmbed...")
+        oembed_url = f"https://api.instagram.com/oembed/?url={url}"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            async with session.get(oembed_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    thumbnail_url = data.get('thumbnail_url')
+                    
+                    if thumbnail_url:
+                        # Получаем HTML страницы для видео
+                        async with session.get(url, headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }) as page_resp:
+                            if page_resp.status == 200:
+                                html = await page_resp.text()
+                                video_match = re.search(r'"video_url":"([^"]+)"', html)
+                                if video_match:
+                                    video_url = video_match.group(1).replace('\\/', '/')
+                                    shortcode = re.search(r'/(?:p|reel)/([^/]+)', url).group(1)
+                                    temp_path = os.path.join(tempfile.gettempdir(), f"insta_oembed_{shortcode}.mp4")
+                                    if await download_file(video_url, temp_path):
+                                        return (temp_path, None, None)
+    except Exception as e:
+        logger.error(f"❌ Instagram oEmbed: {e}")
+    return None, None, None
+
+async def download_instagram_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    try:
+        logger.info("🔄 Instagram: попытка через yt-dlp...")
+        ydl_opts = {
+            'format': 'best',
+            'noplaylist': True,
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            temp_file = ydl.prepare_filename(info)
+            if temp_file and os.path.exists(temp_file):
+                return (temp_file, None, None)
+    except Exception as e:
+        logger.error(f"❌ Instagram yt-dlp: {e}")
+    return None, None, None
+
 async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     try:
         logger.info("🔄 Instagram: попытка через Instaloader...")
@@ -161,28 +262,6 @@ async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Opti
                 return (None, photos, description)
     except Exception as e:
         logger.error(f"❌ Instagram Instaloader: {e}")
-    return None, None, None
-
-async def download_instagram_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    try:
-        logger.info("🔄 Instagram: попытка через yt-dlp...")
-        ydl_opts = {
-            'format': 'best',  # Не мержим
-            'noplaylist': True,
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            if temp_file and os.path.exists(temp_file):
-                return (temp_file, None, None)
-    except Exception as e:
-        logger.error(f"❌ Instagram yt-dlp: {e}")
     return None, None, None
 
 async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
@@ -235,9 +314,12 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         return None, None, "❌ Не удалось извлечь shortcode из URL"
     shortcode = shortcode_match.group(1)
 
+    # ✅ НОВЫЙ ПОРЯДОК МЕТОДОВ (самые надёжные первыми)
     methods = [
-        lambda: download_instagram_instaloader(url, shortcode),
+        lambda: download_instagram_embedder(url, shortcode),
+        lambda: download_instagram_oembed(url),
         lambda: download_instagram_ytdlp(url, quality),
+        lambda: download_instagram_instaloader(url, shortcode),
         lambda: download_instagram_api(url, shortcode)
     ]
 
@@ -310,7 +392,7 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
         logger.error(f"❌ TikTok фото ошибка: {e}")
         return None, f"❌ Ошибка: {str(e)[:100]}"
 
-# === 📤 СКАЧИВАНИЕ ВИДЕО — ВСЕ 3 МЕТОДА ===
+# === 📤 СКАЧИВАНИЕ ВИДЕО ===
 async def download_video_ytdlp(url: str, quality: str) -> Optional[str]:
     try:
         logger.info("🔄 Видео: попытка через yt-dlp...")
@@ -389,7 +471,7 @@ async def send_photos_with_caption(chat_id: int, photos: List[str], caption: str
         logger.error(f"Ошибка отправки фото: {e}")
         return False
 
-# === 📤 ЗАГРУЗКА НА ФАЙЛООБМЕННИКИ (БЕЗ OSHI.AT!) ===
+# === 📤 ЗАГРУЗКА НА ФАЙЛООБМЕННИКИ ===
 async def upload_to_filebin(file_path: str) -> Optional[str]:
     try:
         logger.info("🔄 Загрузка на filebin.net...")
@@ -397,7 +479,6 @@ async def upload_to_filebin(file_path: str) -> Optional[str]:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file', f, filename=Path(file_path).name)
-                # ✅ ИСПРАВЛЕНО: нет пробелов!
                 async with session.post('https://filebin.net/', data=data, params={'expiry': '3d'}) as resp:
                     if resp.status == 200:
                         text = await resp.text()
@@ -413,7 +494,6 @@ async def upload_to_gofile(file_path: str) -> Optional[str]:
     try:
         logger.info("🔄 Загрузка на gofile.io...")
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
-            # ✅ ИСПРАВЛЕНО: нет пробелов!
             async with session.get('https://api.gofile.io/servers') as resp:
                 if resp.status != 200:
                     return None
@@ -448,7 +528,6 @@ async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") ->
     uploaders = [
         ('gofile.io', upload_to_gofile),
         ('filebin.net', upload_to_filebin),
-        # oshi.at УДАЛЁН — не является файловым хостингом
     ]
 
     for name, uploader in uploaders:
@@ -540,6 +619,9 @@ async def handle_link(message: types.Message):
         await message.answer("⚠️ Отправьте корректную ссылку на YouTube, TikTok или Instagram")
         return
 
+    # ✅ RATE LIMITING
+    await check_rate_limit(message.from_user.id)
+
     platform = detect_platform(url)
     status_msg = await message.answer(f"⏳ Обрабатываю {platform.upper()}...")
     user_quality = get_quality_setting(message.from_user.id)
@@ -598,15 +680,6 @@ async def handle_link(message: types.Message):
                     os.remove(photo)
             except Exception as e:
                 logger.warning(f"Не удалось удалить фото {photo}: {e}")
-
-# === 🌐 WEBHOOK ===
-async def on_startup(bot: Bot):
-    await bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"✅ Webhook установлен на {WEBHOOK_URL}")
-
-async def on_shutdown(bot: Bot):
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.session.close()
 
 # === 🚀 ЗАПУСК: ГИБКИЙ РЕЖИМ ===
 async def main():
