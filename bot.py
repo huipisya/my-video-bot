@@ -139,6 +139,8 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
+# ... (ваши текущие импорты и настройки остаются без изменений) ...
+
 # === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ ===
 
 async def download_instagram_embedder(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
@@ -221,6 +223,12 @@ async def download_instagram_ytdlp(url: str, quality: str) -> Tuple[Optional[str
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
         }
+        # Используем cookies, если они есть
+        cookies_file = Path("cookies.txt")
+        if cookies_file.exists():
+            ydl_opts['cookiefile'] = str(cookies_file)
+            logger.info("✅ Используются куки из cookies.txt (yt-dlp)")
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
@@ -241,6 +249,12 @@ async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Opti
             save_metadata=False,
             quiet=True
         )
+        # Используем cookies, если они есть
+        cookies_file = Path("cookies.txt")
+        if cookies_file.exists():
+            L.load_session_from_file("your_username_or_session_name", str(cookies_file)) # Замените на реальный username или укажите файл сессии
+            logger.info("✅ Используется сессия из cookies.txt (Instaloader)")
+
         post = instaloader.Post.from_shortcode(L.context, shortcode)
 
         if post.is_video:
@@ -308,7 +322,7 @@ async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str
         logger.error(f"❌ Instagram API: {e}")
     return None, None, None
 
-# --- 🆕 НОВЫЙ МЕТОД ДЛЯ REELS ---
+# --- 🆕 НОВЫЙ МЕТОД ДЛЯ REELS С МОБИЛЬНОЙ ЭМУЛЯЦИЕЙ ---
 async def download_instagram_reels_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """Надежный метод для скачивания Reels через yt-dlp с эмуляцией мобильного устройства."""
     try:
@@ -349,7 +363,7 @@ async def download_instagram_reels_ytdlp(url: str, quality: str) -> Tuple[Option
         cookies_file = Path("cookies.txt")
         if cookies_file.exists():
             ydl_opts['cookiefile'] = str(cookies_file)
-            logger.info("✅ Используются куки из cookies.txt")
+            logger.info("✅ Используются куки из cookies.txt (Reels)")
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(reel_url, download=True)
@@ -361,7 +375,192 @@ async def download_instagram_reels_ytdlp(url: str, quality: str) -> Tuple[Option
         logger.error(f"❌ Instagram Reels yt-dlp: {e}")
     return None, None, None
 
-# --- 🆕 ИСПРАВЛЕННАЯ ФУНКЦИЯ download_instagram ---
+# --- 🆕 НОВЫЕ МЕТОДЫ ЧЕРЕЗ СТОРОННИЕ СЕРВИСЫ ---
+async def get_video_from_third_party(url: str, service_name: str, service_func) -> Optional[str]:
+    """Общая функция для получения видео через сторонний сервис."""
+    try:
+        logger.info(f"🔄 Instagram: попытка через {service_name}...")
+        video_url = await service_func(url)
+        if video_url:
+            temp_path = os.path.join(tempfile.gettempdir(), f"insta_{service_name}.mp4")
+            if await download_file(video_url, temp_path):
+                logger.info(f"✅ Видео получено через {service_name}")
+                return temp_path
+    except Exception as e:
+        logger.error(f"❌ Ошибка при использовании {service_name}: {e}")
+    return None
+
+async def get_video_url_from_ssstik(url: str) -> Optional[str]:
+    """Получает ссылку на видео с ssstik.io"""
+    # ssstik.io часто требует реферер и может использовать JS, но попробуем простой запрос
+    # Это может не всегда работать, зависит от обфускации/JS на их стороне
+    # Пример: https://ssstik.io/abc?query=https://www.instagram.com/reel/XXXX/
+    # или https://ssstik.io/en - отправка формы
+    # Попробуем отправку формы
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://ssstik.io/en',
+            'Origin': 'https://ssstik.io',
+        }
+        # ssstik.io обычно использует POST-запрос к /abc с параметром query
+        # Нужно сначала получить страницу, чтобы получить токены/скрипты, но для простоты попробуем напрямую
+        # Сайт может изменять структуру, этот код хрупкий
+        try:
+            # Получаем страницу и пытаемся найти form-action и token
+            async with session.get('https://ssstik.io/en', headers=headers) as page_resp:
+                if page_resp.status != 200:
+                    return None
+                page_html = await page_resp.text()
+                # Ищем форму
+                match = re.search(r'<form.*?action="(.*?)".*?>', page_html, re.S)
+                if not match:
+                    return None
+                form_action = match.group(1)
+
+                # Ищем скрытое поле с токеном, например, 'token'
+                token_match = re.search(r'<input.*?name="token".*?value="(.*?)"', page_html)
+                token = token_match.group(1) if token_match else ""
+
+            # Отправляем POST-запрос
+            data = aiohttp.FormData()
+            data.add_field('id', url)
+            data.add_field('locale', 'en')
+            data.add_field('token', token) # Используем токен, если нашли
+            # ssstik может использовать динамические имена полей, это усложняет задачу
+            # Для простоты, если токен не найден, отправим без него
+            if not token:
+                data._fields = [f for f in data._fields if f[1] != 'token']
+
+            async with session.post(f'https://ssstik.io{form_action}', data=data, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+
+            # Ищем ссылку на видео
+            # ssstik обычно предоставляет ссылку в элементе <a> с data-url или href
+            # или через JS в атрибутах кнопки
+            # Примеры:
+            # <a href="https://..." download="">Download HD</a>
+            # <button data-url="https://...">
+            # Ссылка может быть в JSON внутри скрипта
+            # Это хрупко, но пробуем
+            # Часто ссылка на видео без звука и с отдельной ссылкой на аудио
+            # Ищем ссылку на видео (обычно mp4)
+            video_match = re.search(r'download\.link.*?"(https?://[^"]*\.mp4[^"]*)"', html)
+            if video_match:
+                return video_match.group(1)
+
+            # Альтернативный паттерн
+            video_match = re.search(r'href="(https?://[^"]*\.mp4[^"]*)"[^>]*download', html)
+            if video_match:
+                return video_match.group(1)
+
+            # Паттерн для кнопки
+            button_match = re.search(r'data-url="(https?://[^"]*\.mp4[^"]*)"', html)
+            if button_match:
+                return button_match.group(1)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при парсинге ssstik.io: {e}")
+    return None
+
+async def get_video_url_from_ttdownloader(url: str) -> Optional[str]:
+    """Получает ссылку на видео с ttdownloader.com"""
+    # ttdownloader.com часто использует POST-запрос к /api/ajax/search
+    # и возвращает JSON с результатами
+    # Пример: POST /api/ajax/search с data: { query: url, lang: 'en' }
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://ttdownloader.com/',
+            'Origin': 'https://ttdownloader.com',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+        data = aiohttp.FormData()
+        data.add_field('query', url)
+        data.add_field('lang', 'en') # или 'en', зависит от сайта
+
+        async with session.post('https://ttdownloader.com/api/ajax/search', data=data, headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            json_data = await resp.json()
+            # Результат обычно в json_data['data']
+            # Ищем ссылку на HD видео
+            # Структура JSON может меняться
+            # Пример: { "data": "<html>...<a href='...'>Download</a>...</html>" }
+            html_content = json_data.get('data', '')
+            if html_content:
+                # Ищем href в <a> тегах
+                links = re.findall(r'<a[^>]+href="(https?://[^"]+\.mp4[^"]*)"', html_content)
+                # Возвращаем первую найденную ссылку на mp4 (обычно это HD)
+                if links:
+                    return links[0]
+
+    return None
+
+async def get_video_url_from_snaptik(url: str) -> Optional[str]:
+    """Получает ссылку на видео с snaptik.app"""
+    # snaptik.app часто использует GET-запрос к /snaptik.php с параметром url
+    # и возвращает страницу с результатами
+    # Пример: GET /snaptik.php?url=...
+    # Страница может содержать ссылки в атрибутах или JS
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://snaptik.app/',
+        }
+        params = {'url': url}
+
+        async with session.get('https://snaptik.app/snaptik.php', params=params, headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text()
+
+        # Ищем ссылку на видео
+        # snaptik часто кодирует ссылки в base64 или прячет в JS
+        # Попробуем найти прямую ссылку
+        # Ищем ссылки в href или data-url
+        # Пример: <a href="https://...snaptik.app/download?token=..." download>
+        # или <button onclick="download_video('encoded_url')">
+        # Это может быть сложно без выполнения JS
+        # Попробуем простой паттерн для href
+        # Часто ссылка на видео без звука, аудио отдельно
+        # Ищем ссылку, содержащую "download" или "video"
+        # Пример: <a href="https://.../get_video.php?token=...&title=...&id=...">
+        # Или в base64 в JS: decodeURIComponent(atob('...'))
+        # Это хрупко
+        # Часто используется кнопка с onclick
+        # onclick="download_video('TOKEN')"
+        # И токен нужно подставить в URL: https://snaptik.app/download?token=TOKEN
+        # Попробуем найти токен
+        token_match = re.search(r"download_video\(['\"]([^'\"]+)['\"]\)", html)
+        if token_match:
+            token = token_match.group(1)
+            download_url = f"https://snaptik.app/download?token={token}"
+            # Теперь нужно получить прямую ссылку из этого download URL
+            # Иногда он ведет на страницу с <a href="...">, иногда редиректит
+            async with session.get(download_url, headers=headers) as dl_resp:
+                if dl_resp.status == 200:
+                    # Проверим, редирект ли это
+                    final_url = str(dl_resp.url)
+                    if final_url and final_url.endswith('.mp4'):
+                         return final_url
+                    # Или снова получаем HTML и ищем ссылку
+                    dl_html = await dl_resp.text()
+                    dl_link_match = re.search(r'<a[^>]+href="(https?://[^"]+\.mp4[^"]*)"', dl_html)
+                    if dl_link_match:
+                        return dl_link_match.group(1)
+
+        # Альтернативный паттерн для прямой ссылки в href
+        direct_match = re.search(r'<a[^>]+href="(https?://[^"]*\.mp4[^"]*)"[^>]*download', html)
+        if direct_match:
+            return direct_match.group(1)
+
+    return None
+
+
+# --- 🆕 ИСПРАВЛЕННАЯ ФУНКЦИЯ download_instagram С РЕЗЕРВНЫМИ СЕРВИСАМИ ---
 async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     # Исправленное извлечение shortcode (учитывает /share/)
     shortcode_match = re.search(r'/(?:p|reel|share)/([^/]+)', url)
@@ -387,10 +586,25 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         lambda: download_instagram_api(url, shortcode)
     ])
 
+    # Пробуем основные методы
     for method in methods:
         result = await method()
         if result and (result[0] or result[1]):
             return result
+
+    # Если основные методы не сработали, пробуем сторонние сервисы (только для видео)
+    logger.info("🔄 Instagram: все основные методы не сработали, пробуем сторонние сервисы...")
+    third_party_methods = [
+        ("ssstik", lambda: get_video_from_third_party(url, "ssstik", get_video_url_from_ssstik)),
+        ("ttdownloader", lambda: get_video_from_third_party(url, "ttdownloader", get_video_url_from_ttdownloader)),
+        ("snaptik", lambda: get_video_from_third_party(url, "snaptik", get_video_url_from_snaptik)),
+    ]
+
+    for service_name, method in third_party_methods:
+        result_file = await method()
+        if result_file:
+            # Успешно получили файл через сторонний сервис
+            return (result_file, None, None) # Возвращаем как видео
 
     return None, None, "❌ Не удалось скачать контент из Instagram всеми методами"
 
