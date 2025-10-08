@@ -981,7 +981,7 @@ async def back_to_main(message: types.Message, state: FSMContext):
 #             return
 #
 #         await status_msg.edit_text("📤 Отправляю...")
-#         await send_video_or_link(message.chat.id, temp_file, caption="🎥 Готово!", state=state) # <--- Передаем state
+#         await send_video_or_link(message.chat.id, temp_file, state=state) # <--- Передаем state
 #         await status_msg.delete()
 #
 #         # 🧹 АВТООЧИСТКА после отправки
@@ -1067,7 +1067,7 @@ async def handle_link(message: types.Message, state: FSMContext):
             waiting_msg = await message.answer(f"⏳ Ожидайте, видео загружается... (примерное время: {estimated_time})")
 
         # Передаём ID сообщения "ожидайте" в send_video_or_link
-        await send_video_or_link(message.chat.id, temp_file, caption="🎥 Готово!", state=state, waiting_message_id=waiting_msg.message_id if waiting_msg else None) # <--- Передаем state и waiting_message_id
+        await send_video_or_link(message.chat.id, temp_file, state=state, waiting_message_id=waiting_msg.message_id if waiting_msg else None) # <--- Передаем state и waiting_message_id
 
         # 🧹 УДАЛИТЬ сообщение "ожидайте", если оно было
         if waiting_msg:
