@@ -62,8 +62,20 @@ QUALITY_FORMATS = {
     "360p": 'best[height<=360][ext=mp4]/best[ext=mp4]/best'
 }
 
-# === 🧺 КЭШ ===
-CACHE_TTL = 0
+# === 🧹 АВТООЧИСТКА ФАЙЛОВ ===
+def cleanup_file(file_path: str):
+    """Удаляет файл сразу после использования"""
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"🗑️ Удалён файл: {Path(file_path).name}")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось удалить {file_path}: {e}")
+
+def cleanup_files(files: List[str]):
+    """Удаляет список файлов"""
+    for file_path in files:
+        cleanup_file(file_path)
 
 # === 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 async def check_rate_limit(user_id: int):
@@ -113,15 +125,6 @@ def detect_platform(url: str) -> str:
     elif 'instagram.com' in url_lower:
         return 'instagram'
     return 'unknown'
-
-def get_cache_key(url: str) -> str:
-    return hashlib.md5(url.encode()).hexdigest()
-
-def load_from_cache(key: str):
-    return None
-
-def save_to_cache(key: str, data):
-    pass
 
 async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
     try:
@@ -305,16 +308,11 @@ async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str
     return None, None, None
 
 async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    cached_result = load_from_cache(get_cache_key(url))
-    if cached_result:
-        return cached_result
-
     shortcode_match = re.search(r'/(?:p|reel)/([^/]+)', url)
     if not shortcode_match:
         return None, None, "❌ Не удалось извлечь shortcode из URL"
     shortcode = shortcode_match.group(1)
 
-    # ✅ НОВЫЙ ПОРЯДОК МЕТОДОВ (самые надёжные первыми)
     methods = [
         lambda: download_instagram_embedder(url, shortcode),
         lambda: download_instagram_oembed(url),
@@ -326,17 +324,12 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
     for method in methods:
         result = await method()
         if result and (result[0] or result[1]):
-            save_to_cache(get_cache_key(url), result)
             return result
 
     return None, None, "❌ Не удалось скачать контент из Instagram всеми методами"
 
 # === 📤 TIKTOK ФОТО ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
-    cached_result = load_from_cache(get_cache_key(url))
-    if cached_result:
-        return cached_result
-
     try:
         clean_url = url.split('?')[0]
         headers = {
@@ -380,9 +373,7 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
                 photos.append(photo_path)
 
         if photos:
-            result = (photos, "📸 Фото из TikTok")
-            save_to_cache(get_cache_key(url), result)
-            return result
+            return (photos, "📸 Фото из TikTok")
         else:
             return None, "❌ Не удалось скачать ни одного фото"
 
@@ -466,6 +457,7 @@ async def send_photos_with_caption(chat_id: int, photos: List[str], caption: str
                 for i, photo in enumerate(photos[:10])
             ]
             await bot.send_media_group(chat_id=chat_id, media=media_group)
+        logger.info(f"✅ Отправлено {len(photos)} фото в Telegram")
         return True
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
@@ -521,6 +513,7 @@ async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") ->
     if size_mb <= 50:
         try:
             await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), caption=caption)
+            logger.info(f"✅ Видео ({size_mb:.1f} МБ) отправлено в Telegram")
             return True
         except TelegramBadRequest as e:
             logger.error(f"Ошибка отправки видео: {e}")
@@ -637,7 +630,9 @@ async def handle_link(message: types.Message):
             if photos:
                 temp_photos = photos
                 await status_msg.delete()
-                await send_photos_with_caption(message.chat.id, photos, description)
+                success = await send_photos_with_caption(message.chat.id, photos, description)
+                # 🧹 АВТООЧИСТКА после отправки
+                cleanup_files(photos)
                 return
 
         elif platform == 'tiktok':
@@ -646,7 +641,9 @@ async def handle_link(message: types.Message):
                 await status_msg.delete()
                 if photos:
                     temp_photos = photos
-                    await send_photos_with_caption(message.chat.id, photos, description)
+                    success = await send_photos_with_caption(message.chat.id, photos, description)
+                    # 🧹 АВТООЧИСТКА после отправки
+                    cleanup_files(photos)
                 else:
                     await message.answer(description)
                 return
@@ -659,6 +656,9 @@ async def handle_link(message: types.Message):
         await status_msg.edit_text("📤 Отправляю...")
         await send_video_or_link(message.chat.id, temp_file, caption="🎥 Готово!")
         await status_msg.delete()
+        
+        # 🧹 АВТООЧИСТКА после отправки
+        cleanup_file(temp_file)
 
     except Exception as e:
         error_msg = f"❌ Ошибка: {str(e)}"
@@ -669,17 +669,11 @@ async def handle_link(message: types.Message):
             pass
     
     finally:
-        if temp_file and os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except Exception as e:
-                logger.warning(f"Не удалось удалить файл {temp_file}: {e}")
-        for photo in temp_photos:
-            try:
-                if os.path.exists(photo):
-                    os.remove(photo)
-            except Exception as e:
-                logger.warning(f"Не удалось удалить фото {photo}: {e}")
+        # 🧹 ФИНАЛЬНАЯ ОЧИСТКА (на случай ошибок)
+        if temp_file:
+            cleanup_file(temp_file)
+        if temp_photos:
+            cleanup_files(temp_photos)
 
 # === 🚀 ЗАПУСК: ГИБКИЙ РЕЖИМ ===
 async def main():
