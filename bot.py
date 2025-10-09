@@ -601,7 +601,6 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
         "  4. Перезапустить Instagram на своем устройстве\n\n"
-        f"<code>Shortcode: {shortcode}</code>"
     )
     
     return None, None, error_msg
