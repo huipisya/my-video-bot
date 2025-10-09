@@ -600,7 +600,7 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         "  1. Отключить ограничения 18+ в настройках Instagram\n"
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
-        "  4. Перезапустить Instagram на устройстве\n\n"
+        "  4. Перезапустить Instagram на своем устройстве\n\n"
         f"<code>Shortcode: {shortcode}</code>"
     )
     
@@ -882,7 +882,7 @@ async def back_to_main(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
 
-# === 📥 ОБРАБОТКА ССЫЛОК ===
+# === 📥 ОБРАБОТКА ССЫЛОК (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
 @dp.message(F.text)
 async def handle_link(message: types.Message, state: FSMContext):
     url = message.text.strip()
@@ -902,15 +902,31 @@ async def handle_link(message: types.Message, state: FSMContext):
     try:
         if platform == 'instagram':
             temp_file, photos, description = await download_instagram(url, user_quality)
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Проверяем description на ошибки
             if description and "❌" in description:
-                await status_msg.edit_text(description)
+                await status_msg.edit_text(description, parse_mode="HTML")
                 return
+            
             if photos:
                 temp_photos = photos
                 await status_msg.delete()
                 success = await send_photos_with_caption(message.chat.id, photos, description)
-                # 🧹 АВТООЧИСТКА после отправки
                 cleanup_files(photos)
+                return
+            
+            # 🔥 НОВОЕ: Если temp_file есть (видео скачано)
+            if temp_file and os.path.exists(temp_file):
+                await status_msg.edit_text("📤 Отправляю...")
+                await send_video_or_link(message.chat.id, temp_file)
+                await status_msg.delete()
+                cleanup_file(temp_file)
+                return
+            
+            # 🔥 НОВОЕ: Если ничего не скачано - показываем детальную ошибку
+            if not temp_file and not photos:
+                error_detail = description if description else "❌ Не удалось скачать контент"
+                await status_msg.edit_text(error_detail, parse_mode="HTML")
                 return
 
         elif platform == 'tiktok':
@@ -920,22 +936,20 @@ async def handle_link(message: types.Message, state: FSMContext):
                 if photos:
                     temp_photos = photos
                     success = await send_photos_with_caption(message.chat.id, photos, description)
-                    # 🧹 АВТООЧИСТКА после отправки
                     cleanup_files(photos)
                 else:
                     await message.answer(description)
                 return
 
+        # Для YouTube и TikTok видео
         temp_file = await download_video(url, user_quality)
         if not temp_file or not os.path.exists(temp_file):
             await status_msg.edit_text("❌ Не удалось скачать видео всеми доступными методами")
             return
 
         await status_msg.edit_text("📤 Отправляю...")
-        await send_video_or_link(message.chat.id, temp_file,)
+        await send_video_or_link(message.chat.id, temp_file)
         await status_msg.delete()
-        
-        # 🧹 АВТООЧИСТКА после отправки
         cleanup_file(temp_file)
 
     except Exception as e:
@@ -947,12 +961,12 @@ async def handle_link(message: types.Message, state: FSMContext):
             pass
     
     finally:
-        # 🧹 ФИНАЛЬНАЯ ОЧИСТКА (на случай ошибок)
+        # 🧹 ФИНАЛЬНАЯ ОЧИСТКА
         if temp_file:
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
-
+            
 # === 🚀 ЗАПУСК: ГИБКИЙ РЕЖИМ ===
 async def main():
     logger.info("🚀 Запуск бота...")
