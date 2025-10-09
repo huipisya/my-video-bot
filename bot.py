@@ -597,7 +597,7 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         "  • Контент удален или недоступен\n"
         "  • Instagram заблокировал доступ\n\n"
         "<b>Что делать:</b>\n"
-        "  1. Отключить ограничения 18+ в настройках Instagram\n"
+        "  1. <a href='https://t.me/skacattthelp/2'>Попробуйте</a> отключить ограничения 18+ в настройках Instagram\n"
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
         "  4. Перезапустить Instagram на своем устройстве\n\n"
@@ -605,6 +605,7 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
     )
     
     return None, None, error_msg
+    
 
 # === 📤 TIKTOK ФОТО ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
@@ -966,7 +967,7 @@ async def handle_link(message: types.Message, state: FSMContext):
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
-            
+
 # === 🚀 ЗАПУСК: ГИБКИЙ РЕЖИМ ===
 async def main():
     logger.info("🚀 Запуск бота...")
