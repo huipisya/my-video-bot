@@ -885,9 +885,6 @@ async def handle_settings_buttons(message: types.Message, state: FSMContext):
         )
         await state.clear()
 
-# --- ✅ ИСПРАВЛЕНИЕ: ОБРАБОТЧИК ДЛЯ ССЫЛОК ---
-# Этот обработчик срабатывает ТОЛЬКО если текст НЕ является командой и НЕ соответствует кнопкам настроек.
-# Мы используем F.text & ~F.text.in_(...) для исключения кнопок.
 @dp.message(
     F.text &  # Только текстовые сообщения
     ~F.text.startswith("/") &  # Исключаем команды
