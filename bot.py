@@ -710,6 +710,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
         resize_keyboard=True
     )
+
 def settings_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -720,10 +721,29 @@ def settings_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True
     )
+
+# === 🧭 КЛАВИАТУРЫ ===
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
+        resize_keyboard=True
+    )
+
+def settings_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🌟 Лучшее")],
+            [KeyboardButton(text="🎬 1080p"), KeyboardButton(text="📺 720p")],
+            [KeyboardButton(text="⚡ 480p"), KeyboardButton(text="📱 360p")],
+            [KeyboardButton(text="◀️ Назад")]
+        ],
+        resize_keyboard=True
+    )
+
 # === 🚀 КОМАНДЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
+    await state.clear() # Очищаем состояние при старте
     welcome_text = (
         "🎬 <b>Добро пожаловать в VideoBot!</b>\n"
         "Я могу скачать видео с:\n"
@@ -758,31 +778,37 @@ async def set_quality(message: types.Message, state: FSMContext):
     user_settings[message.from_user.id] = quality_map[message.text]
     await message.answer(
         f"✅ Установлено: <b>{message.text}</b>",
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(), # Возвращаемся к основной клавиатуре
         parse_mode="HTML"
     )
+    # Явно очищаем состояние FSM (хотя это уже делается, но для уверенности)
     await state.clear()
 
 @dp.message(VideoStates.choosing_quality, F.text == "◀️ Назад")
 async def back_to_main(message: types.Message, state: FSMContext):
-    await state.clear()
+    await state.clear() # Очищаем состояние
     await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
 
 # --- ✅ ЗАМЕНИТЬ: ОБРАБОТЧИК ДЛЯ ССЫЛОК (исключает команды и кнопки настроек) ---
 @dp.message(
     F.text &  # Только текстовые сообщения
     ~F.text.startswith("/") &  # Исключаем команды
-    ~F.text.in_([  # Исключаем все тексты кнопоки
+    ~F.text.in_([  # Исключаем все тексты кнопок
         "⚙️ Настройки",
         "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p", "◀️ Назад"
     ])
 )
 async def handle_link(message: types.Message, state: FSMContext):
+    # Добавляем проверку состояния, чтобы избежать конфликтов
+    if await state.get_state() is not None:
+        # Если бот находится в каком-либо состоянии FSM, игнорируем сообщение
+        # Это предотвращает обработку ссылок во время настройки
+        return
+
     url = message.text.strip()
     if not is_valid_url(url):
         await message.answer("⚠️ Отправьте корректную ссылку на YouTube, TikTok или Instagram")
         return
-
     # ✅ RATE LIMITING
     await check_rate_limit(message.from_user.id)
     platform = detect_platform(url)
@@ -790,7 +816,6 @@ async def handle_link(message: types.Message, state: FSMContext):
     user_quality = get_quality_setting(message.from_user.id)
     temp_file = None
     temp_photos = []
-
     try:
         if platform == 'instagram':
             temp_file, photos, description = await download_instagram(url, user_quality)
@@ -816,7 +841,6 @@ async def handle_link(message: types.Message, state: FSMContext):
                 error_detail = description if description else "❌ Не удалось скачать контент"
                 await status_msg.edit_text(error_detail, parse_mode="HTML")
                 return
-
         elif platform == 'tiktok':
             if '/photo/' in url.lower():
                 photos, description = await download_tiktok_photos(url)
@@ -828,18 +852,15 @@ async def handle_link(message: types.Message, state: FSMContext):
                 else:
                     await message.answer(description)
                 return
-
         # Для YouTube и TikTok видео
         temp_file = await download_video(url, user_quality)
         if not temp_file or not os.path.exists(temp_file):
             await status_msg.edit_text("❌ Не удалось скачать видео всеми доступными методами")
             return
-
         await status_msg.edit_text("📤 Отправляю...")
         await send_video_or_link(message.chat.id, temp_file)
         await status_msg.delete()
         cleanup_file(temp_file)
-
     except Exception as e:
         error_msg = f"❌ Ошибка: {str(e)}"
         logger.error(error_msg)
@@ -847,7 +868,6 @@ async def handle_link(message: types.Message, state: FSMContext):
             await status_msg.edit_text(error_msg)
         except:
             pass
-
     finally:
         # 🧹 ФИНАЛЬНАЯ ОЧИСТКА
         if temp_file:
@@ -885,7 +905,7 @@ async def main():
             await bot.session.close()
     else:
         # === Режим Long Polling (для локального запуска) ===
-        logger.info("🔄 Запуск в режиме long polling (локально)")
+        logger.info("🔄 Запуск в режиме long polling (лакальна)")
         await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
