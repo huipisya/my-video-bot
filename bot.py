@@ -21,38 +21,29 @@ import yt_dlp
 import instaloader
 import pickle
 import sys
- 
 sys.stdout.reconfigure(encoding='utf-8')
-
 # === 🧰 ЛОГИРОВАНИЕ ===
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 # === 🔐 ТОКЕН И WEBHOOK ===
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
-
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не найден в переменных окружения")
-
 WEBHOOK_PATH = "/"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
 # === 🧠 ХРАНИЛИЩЕ НАСТРОЕК ===
 user_settings = {}
 RATE_LIMIT_DELAY = {}  # {user_id: last_request_time}
-
 # === 🎨 СОСТОЯНИЯ FSM ===
 class VideoStates(StatesGroup):
     choosing_quality = State()
-
 # === 📺 КАЧЕСТВА ВИДЕО ===
 QUALITY_FORMATS = {
     "best": 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -61,7 +52,6 @@ QUALITY_FORMATS = {
     "480p": 'best[height<=480][ext=mp4]/best[ext=mp4]/best',
     "360p": 'best[height<=360][ext=mp4]/best[ext=mp4]/best'
 }
-
 # === 🧹 АВТООЧИСТКА ФАЙЛОВ ===
 def cleanup_file(file_path: str):
     """Удаляет файл сразу после использования"""
@@ -71,12 +61,10 @@ def cleanup_file(file_path: str):
             logger.info(f"🗑️ Удалён файл: {Path(file_path).name}")
     except Exception as e:
         logger.warning(f"⚠️ Не удалось удалить {file_path}: {e}")
-
 def cleanup_files(files: List[str]):
     """Удаляет список файлов"""
     for file_path in files:
         cleanup_file(file_path)
-
 # === 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 async def check_rate_limit(user_id: int):
     """Ограничение: 1 запрос в 3 секунды"""
@@ -87,10 +75,8 @@ async def check_rate_limit(user_id: int):
         logger.info(f"⏱️ Rate limit для user {user_id}: ждём {delay:.1f}с")
         await asyncio.sleep(delay)
     RATE_LIMIT_DELAY[user_id] = time.time()
-
 def get_quality_setting(user_id: int) -> str:
     return user_settings.get(user_id, "best")
-
 def get_ydl_opts(quality: str = "best") -> dict:
     opts = {
         'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
@@ -107,7 +93,6 @@ def get_ydl_opts(quality: str = "best") -> dict:
     if proxy:
         opts['proxy'] = proxy
     return opts
-
 def is_valid_url(url: str) -> bool:
     regex = re.compile(
         r'^(https?://)?(www\.)?'
@@ -115,7 +100,6 @@ def is_valid_url(url: str) -> bool:
         re.IGNORECASE
     )
     return bool(re.match(regex, url))
-
 def detect_platform(url: str) -> str:
     url_lower = url.lower()
     if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
@@ -125,7 +109,6 @@ def detect_platform(url: str) -> str:
     elif 'instagram.com' in url_lower:
         return 'instagram'
     return 'unknown'
-
 async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
@@ -138,9 +121,7 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
     except Exception as e:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
-
 # === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ (2025) ===
-
 async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через мобильный Instagram API (самый надежный в 2025)
@@ -148,10 +129,8 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
     """
     try:
         logger.info("🔄 Instagram: Mobile API (приоритетный метод)...")
-        
         # Формируем API URL
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
-        
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             headers = {
                 'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
@@ -170,33 +149,26 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                 'X-FB-HTTP-Engine': 'Liger',
                 'Connection': 'keep-alive',
             }
-            
             async with session.get(api_url, headers=headers) as resp:
                 if resp.status == 404:
                     logger.warning("Mobile API: контент не найден (404)")
                     return None, None, None
-                
                 if resp.status != 200:
                     logger.warning(f"Mobile API вернул статус {resp.status}")
                     return None, None, None
-                
                 try:
                     data = await resp.json()
                 except:
                     logger.warning("Не удалось распарсить JSON от Mobile API")
                     return None, None, None
-                
                 # Извлекаем items
                 items = data.get('items', [])
                 if not items:
                     logger.warning("Mobile API: нет items в ответе")
                     return None, None, None
-                
                 media = items[0]
                 media_type = media.get('media_type', 0)
-                
                 # media_type: 1 = фото, 2 = видео, 8 = карусель
-                
                 # Карусель (несколько фото/видео)
                 if media_type == 8:
                     carousel_media = media.get('carousel_media', [])
@@ -204,10 +176,8 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                         logger.info(f"📸 Карусель: {len(carousel_media)} элементов")
                         photos = []
                         videos = []
-                        
                         for idx, item in enumerate(carousel_media[:10]):
                             item_type = item.get('media_type', 0)
-                            
                             # Видео в карусели
                             if item_type == 2:
                                 video_versions = item.get('video_versions', [])
@@ -215,7 +185,6 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                                     video_url = video_versions[0].get('url')
                                     if video_url:
                                         videos.append(video_url)
-                            
                             # Фото в карусели
                             elif item_type == 1:
                                 img_candidates = item.get('image_versions2', {}).get('candidates', [])
@@ -228,21 +197,18 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                                         )
                                         if await download_file(img_url, photo_path):
                                             photos.append(photo_path)
-                        
                         # Если есть видео - скачиваем первое
                         if videos:
                             video_path = os.path.join(tempfile.gettempdir(), f"insta_mobile_{shortcode}.mp4")
                             if await download_file(videos[0], video_path):
                                 logger.info("✅ Видео из карусели скачано (Mobile API)")
                                 return (video_path, None, None)
-                        
                         # Если только фото
                         if photos:
                             caption = media.get('caption', {})
                             description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
                             logger.info(f"✅ {len(photos)} фото скачано (Mobile API)")
                             return (None, photos, description)
-                
                 # Одиночное видео
                 elif media_type == 2:
                     video_versions = media.get('video_versions', [])
@@ -253,7 +219,6 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                             if await download_file(video_url, video_path):
                                 logger.info("✅ Видео скачано (Mobile API)")
                                 return (video_path, None, None)
-                
                 # Одиночное фото
                 elif media_type == 1:
                     img_candidates = media.get('image_versions2', {}).get('candidates', [])
@@ -266,15 +231,11 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                                 description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
                                 logger.info("✅ Фото скачано (Mobile API)")
                                 return (None, [photo_path], description)
-    
     except asyncio.TimeoutError:
         logger.error("⏱️ Таймаут Mobile API")
     except Exception as e:
         logger.error(f"❌ Instagram Mobile API: {e}")
-    
     return None, None, None
-
-
 async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через Instagram GraphQL API
@@ -282,13 +243,10 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
     """
     try:
         logger.info("🔄 Instagram: GraphQL API...")
-        
         # GraphQL query hash для media info
         query_hash = "2b0673e0dc4580674a88d426fe00ea90"
         variables = json.dumps({"shortcode": shortcode})
-        
         graphql_url = f"https://www.instagram.com/graphql/query/?query_hash={query_hash}&variables={variables}"
-        
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
@@ -298,30 +256,24 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                 'X-Requested-With': 'XMLHttpRequest',
                 'X-IG-App-ID': '936619743392459',
             }
-            
             async with session.get(graphql_url, headers=headers) as resp:
                 if resp.status != 200:
                     logger.warning(f"GraphQL вернул статус {resp.status}")
                     return None, None, None
-                
                 try:
                     data = await resp.json()
                 except:
                     return None, None, None
-                
                 media = data.get('data', {}).get('shortcode_media', {})
                 if not media:
                     return None, None, None
-                
                 is_video = media.get('is_video', False)
-                
                 # Карусель
                 carousel = media.get('edge_sidecar_to_children', {}).get('edges', [])
                 if carousel:
                     logger.info(f"📸 Карусель GraphQL: {len(carousel)} элементов")
                     photos = []
                     videos = []
-                    
                     for item in carousel[:10]:
                         node = item.get('node', {})
                         if node.get('is_video', False):
@@ -337,19 +289,16 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                                 )
                                 if await download_file(img_url, photo_path):
                                     photos.append(photo_path)
-                    
                     if videos:
                         video_path = os.path.join(tempfile.gettempdir(), f"insta_graphql_{shortcode}.mp4")
                         if await download_file(videos[0], video_path):
                             logger.info("✅ Видео из карусели (GraphQL)")
                             return (video_path, None, None)
-                    
                     if photos:
                         caption = media.get('edge_media_to_caption', {}).get('edges', [])
                         description = caption[0]['node']['text'] if caption else "📸 Instagram"
                         logger.info(f"✅ {len(photos)} фото (GraphQL)")
                         return (None, photos, description)
-                
                 # Видео
                 elif is_video:
                     video_url = media.get('video_url')
@@ -358,7 +307,6 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                         if await download_file(video_url, video_path):
                             logger.info("✅ Видео скачано (GraphQL)")
                             return (video_path, None, None)
-                
                 # Фото
                 else:
                     img_url = media.get('display_url')
@@ -369,13 +317,9 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                             description = caption[0]['node']['text'] if caption else "📸 Instagram"
                             logger.info("✅ Фото скачано (GraphQL)")
                             return (None, [photo_path], description)
-    
     except Exception as e:
         logger.error(f"❌ Instagram GraphQL: {e}")
-    
     return None, None, None
-
-
 async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через Instagram oEmbed API
@@ -383,21 +327,16 @@ async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[
     """
     try:
         logger.info("🔄 Instagram: oEmbed API...")
-        
         oembed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-        
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/html',
             }
-            
             async with session.get(oembed_url, headers=headers) as resp:
                 if resp.status != 200:
                     return None, None, None
-                
                 html = await resp.text()
-                
                 # Ищем video_url
                 video_match = re.search(r'"video_url":"([^"]+)"', html)
                 if video_match:
@@ -406,7 +345,6 @@ async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[
                     if await download_file(video_url, video_path):
                         logger.info("✅ Видео скачано (oEmbed)")
                         return (video_path, None, None)
-                
                 # Ищем display_url для фото
                 image_match = re.search(r'"display_url":"([^"]+)"', html)
                 if image_match:
@@ -415,13 +353,9 @@ async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[
                     if await download_file(image_url, photo_path):
                         logger.info("✅ Фото скачано (oEmbed)")
                         return (None, [photo_path], "📸 Instagram")
-    
     except Exception as e:
         logger.error(f"❌ Instagram oEmbed: {e}")
-    
     return None, None, None
-
-
 async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через yt-dlp с расширенными настройками
@@ -429,7 +363,6 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
     """
     try:
         logger.info("🔄 Instagram: yt-dlp (расширенный режим)...")
-        
         ydl_opts = {
             'format': 'best',
             'noplaylist': True,
@@ -448,27 +381,22 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
             'geo_bypass': True,
             'geo_bypass_country': 'US',
         }
-        
         # Используем cookies если есть
         cookies_file = Path("cookies.txt")
         if cookies_file.exists():
             ydl_opts['cookiefile'] = str(cookies_file)
             logger.info("✅ Используются cookies для обхода ограничений")
-        
         # Прокси если настроен
         proxy = os.getenv("PROXY_URL")
         if proxy:
             ydl_opts['proxy'] = proxy
             logger.info(f"✅ Используется прокси: {proxy[:20]}...")
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
-            
             if temp_file and os.path.exists(temp_file):
                 logger.info("✅ Скачано через yt-dlp (расширенный)")
                 return (temp_file, None, None)
-    
     except yt_dlp.utils.DownloadError as e:
         error_str = str(e).lower()
         if 'inappropriate' in error_str or '18+' in error_str or 'age' in error_str:
@@ -477,10 +405,7 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
             logger.error(f"❌ yt-dlp download error: {e}")
     except Exception as e:
         logger.error(f"❌ Instagram yt-dlp: {e}")
-    
     return None, None, None
-
-
 async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через Instaloader с возможностью авторизации
@@ -488,7 +413,6 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
     """
     try:
         logger.info("🔄 Instagram: Instaloader (с авторизацией)...")
-        
         L = instaloader.Instaloader(
             download_videos=True,
             download_pictures=True,
@@ -498,7 +422,6 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
             quiet=True,
             user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
         )
-        
         # Пытаемся загрузить сессию если есть
         session_file = Path("session/instagram_session")
         if session_file.exists():
@@ -509,9 +432,7 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
                     logger.info("✅ Загружена сохраненная сессия Instagram")
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось загрузить сессию: {e}")
-        
         post = instaloader.Post.from_shortcode(L.context, shortcode)
-
         if post.is_video:
             video_url = post.video_url
             temp_path = os.path.join(tempfile.gettempdir(), f"insta_loader_{shortcode}.mp4")
@@ -521,7 +442,6 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
         else:
             photos = []
             description = post.caption or "📸 Instagram"
-            
             if post.typename == "GraphSidecar":
                 for i, node in enumerate(post.get_sidecar_nodes()):
                     if node.is_video or i >= 10:
@@ -533,25 +453,19 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
                 photo_path = os.path.join(tempfile.gettempdir(), f"insta_loader_{shortcode}.jpg")
                 if await download_file(post.url, photo_path):
                     photos.append(photo_path)
-            
             if photos:
                 logger.info(f"✅ {len(photos)} фото (Instaloader)")
                 return (None, photos, description)
-    
     except instaloader.exceptions.LoginRequiredException:
         logger.warning("⚠️ Instaloader: требуется авторизация для этого контента")
     except Exception as e:
         logger.error(f"❌ Instagram Instaloader: {e}")
-    
     return None, None, None
-
-
 # === 🎯 ГЛАВНАЯ ФУНКЦИЯ СКАЧИВАНИЯ INSTAGRAM (ОБНОВЛЕННАЯ) ===
 async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Главная функция для скачивания контента из Instagram.
     Использует 5 методов в порядке надежности (2025).
-    
     Returns:
         Tuple[video_path, photos_list, description/error_message]
     """
@@ -559,13 +473,10 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
     shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
     if not shortcode_match:
         return None, None, "❌ Не удалось извлечь shortcode из URL"
-    
     shortcode = shortcode_match.group(1)
     logger.info(f"📌 Instagram shortcode: {shortcode}")
-    
     # Определяем тип контента
     is_reel = '/reel/' in url.lower() or '/share/' in url.lower()
-    
     # Формируем список методов в порядке приоритета (2025)
     methods = [
         ("Mobile API", lambda: download_instagram_mobile_api(url, shortcode)),
@@ -574,38 +485,32 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
         ("oEmbed", lambda: download_instagram_oembed(url, shortcode)),
         ("Instaloader Auth", lambda: download_instagram_instaloader_auth(url, shortcode)),
     ]
-    
     # Пробуем все методы по очереди
     for method_name, method in methods:
         try:
             logger.info(f"🔄 Пробуем метод: {method_name}")
             result = await method()
-            
             if result and (result[0] or result[1]):
                 logger.info(f"✅ Успешно скачано методом: {method_name}")
                 return result
         except Exception as e:
             logger.error(f"❌ Метод {method_name} вызвал исключение: {e}")
             continue
-    
     # Если все методы не сработали - возвращаем детальное сообщение об ошибке
     error_msg = (
-        "<b>Не удалось скачать контент из Instagram</b>\n\n"
+        "<b>Не удалось скачать контент из Instagram</b>\n"
         "<b>Возможные причины:</b>\n"
         "  • Контент 18+ (возрастные ограничения)\n"
         "  • Приватный аккаунт\n"
         "  • Контент удален или недоступен\n"
-        "  • Instagram заблокировал доступ\n\n"
+        "  • Instagram заблокировал доступ\n"
         "<b>Что делать:</b>\n"
         "  1. <a href='https://t.me/skacattthelp/2'>Попробуйте</a> отключить ограничения 18+ в настройках Instagram\n"
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
-        "  4. Перезапустить Instagram на своем устройстве\n\n"
+        "  4. Перезапустить Instagram на своем устройстве\n"
     )
-    
     return None, None, error_msg
-    
-
 # === 📤 TIKTOK ФОТО ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     try:
@@ -617,17 +522,14 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
             'Referer': 'https://www.tiktok.com/',
             'DNT': '1',
         }
-
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.get(clean_url, headers=headers, allow_redirects=True) as resp:
                 if resp.status != 200:
                     return None, f"❌ TikTok вернул статус {resp.status}"
                 html = await resp.text()
-
         json_match = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">({.*})</script>', html)
         if not json_match:
             return None, "❌ Не найден JSON-блок с данными"
-
         try:
             data = json.loads(json_match.group(1))
             item_info = data.get('__DEFAULT_SCOPE__', {}).get('webapp.photo.detail', {}).get('itemInfo', {})
@@ -636,10 +538,8 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
         except Exception as e:
             logger.error(f"Ошибка парсинга JSON: {e}")
             return None, "❌ Не удалось распарсить данные фото"
-
         if not images:
             return None, "❌ Фото не найдены в данных"
-
         photos = []
         for i, img in enumerate(images[:10]):
             img_url = img.get('imageURL', {}).get('urlList', [])
@@ -649,18 +549,15 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
             photo_path = os.path.join(tempfile.gettempdir(), f"tiktok_photo_{i}.jpg")
             if await download_file(url_to_download, photo_path, timeout=15):
                 photos.append(photo_path)
-
         if photos:
             return (photos, "📸 Фото из TikTok")
         else:
             return None, "❌ Не удалось скачать ни одного фото"
-
     except asyncio.TimeoutError:
         return None, "❌ Таймаут при загрузке страницы TikTok"
     except Exception as e:
         logger.error(f"❌ TikTok фото ошибка: {e}")
         return None, f"❌ Ошибка: {str(e)[:100]}"
-
 # === 📤 СКАЧИВАНИЕ ВИДЕО ===
 async def download_video_ytdlp(url: str, quality: str) -> Optional[str]:
     try:
@@ -674,7 +571,6 @@ async def download_video_ytdlp(url: str, quality: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"❌ yt-dlp стандартный: {e}")
     return None
-
 async def download_video_ytdlp_cookies(url: str, quality: str) -> Optional[str]:
     try:
         logger.info("🔄 Видео: попытка через yt-dlp с cookies...")
@@ -691,7 +587,6 @@ async def download_video_ytdlp_cookies(url: str, quality: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"❌ yt-dlp с cookies: {e}")
     return None
-
 async def download_video_ytdlp_alt(url: str) -> Optional[str]:
     try:
         logger.info("🔄 Видео: попытка через yt-dlp (альтернативный формат)...")
@@ -709,7 +604,6 @@ async def download_video_ytdlp_alt(url: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"❌ yt-dlp альтернативный: {e}")
     return None
-
 async def download_video(url: str, quality: str = "best") -> Optional[str]:
     methods = [
         lambda: download_video_ytdlp(url, quality),
@@ -721,7 +615,6 @@ async def download_video(url: str, quality: str = "best") -> Optional[str]:
         if result:
             return result
     return None
-
 # === 📤 ОТПРАВКА ===
 async def send_photos_with_caption(chat_id: int, photos: List[str], caption: str) -> bool:
     if not photos:
@@ -740,7 +633,6 @@ async def send_photos_with_caption(chat_id: int, photos: List[str], caption: str
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         return False
-
 # === 📤 ЗАГРУЗКА НА ФАЙЛООБМЕННИКИ ===
 async def upload_to_filebin(file_path: str) -> Optional[str]:
     try:
@@ -759,7 +651,6 @@ async def upload_to_filebin(file_path: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"❌ filebin.net: {e}")
     return None
-
 async def upload_to_gofile(file_path: str) -> Optional[str]:
     try:
         logger.info("🔄 Загрузка на gofile.io...")
@@ -783,11 +674,9 @@ async def upload_to_gofile(file_path: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"❌ gofile.io: {e}")
     return None
-
 async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") -> bool:
     file_size = Path(file_path).stat().st_size
     size_mb = file_size / (1024 * 1024)
-
     if size_mb <= 50:
         try:
             await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), caption=caption)
@@ -795,34 +684,32 @@ async def send_video_or_link(chat_id: int, file_path: str, caption: str = "") ->
             return True
         except TelegramBadRequest as e:
             logger.error(f"Ошибка отправки видео: {e}")
-
     uploaders = [
         ('gofile.io', upload_to_gofile),
         ('filebin.net', upload_to_filebin),
     ]
-
     for name, uploader in uploaders:
         link = await uploader(file_path)
         if link:
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n\n📥 Скачать: {link}\n\n⏱️ Ссылка действительна несколько дней"
+                text=f"📦 Файл ({size_mb:.1f} МБ) загружен на {name}\n"
+                     f"📥 Скачать: {link}\n"
+                     f"⏱️ Ссылка действительна несколько дней"
             )
             return True
-
     await bot.send_message(
         chat_id=chat_id,
-        text=f"❌ Файл слишком большой ({size_mb:.1f} МБ).\nВсе сервисы загрузки недоступны."
+        text=f"❌ Файл слишком большой ({size_mb:.1f} МБ).\n"
+             f"Все сервисы загрузки недоступны."
     )
     return False
-
 # === 🧭 КЛАВИАТУРЫ ===
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
         resize_keyboard=True
     )
-
 def settings_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -833,7 +720,6 @@ def settings_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True
     )
-
 # === 🚀 КОМАНДЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -858,13 +744,10 @@ async def settings_menu(message: types.Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-# --- ✅ ИСПРАВЛЕНИЕ: ОБРАБОТЧИК ДЛЯ КНОПОК НАСТРОЕК ---
-# Этот обработчик будет срабатывать ТОЛЬКО при нажатии на кнопки в меню настроек.
-# Он имеет более высокий приоритет, чем общий обработчик ссылок.
 @dp.message(VideoStates.choosing_quality, F.text.in_([
-    "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p", "◀️ Назад"
+    "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p"
 ]))
-async def handle_settings_buttons(message: types.Message, state: FSMContext):
+async def set_quality(message: types.Message, state: FSMContext):
     quality_map = {
         "🌟 Лучшее": "best",
         "🎬 1080p": "1080p",
@@ -872,19 +755,20 @@ async def handle_settings_buttons(message: types.Message, state: FSMContext):
         "⚡ 480p": "480p",
         "📱 360p": "360p"
     }
+    user_settings[message.from_user.id] = quality_map[message.text]
+    await message.answer(
+        f"✅ Установлено: <b>{message.text}</b>",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.clear()
 
-    if message.text == "◀️ Назад":
-        await state.clear()
-        await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
-    else:
-        user_settings[message.from_user.id] = quality_map[message.text]
-        await message.answer(
-            f"✅ Установлено: <b>{message.text}</b>",
-            reply_markup=main_keyboard(),
-            parse_mode="HTML"
-        )
-        await state.clear()
+@dp.message(VideoStates.choosing_quality, F.text == "◀️ Назад")
+async def back_to_main(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
 
+# --- ✅ ЗАМЕНИТЬ: ОБРАБОТЧИК ДЛЯ ССЫЛОК (исключает команды и кнопки настроек) ---
 @dp.message(
     F.text &  # Только текстовые сообщения
     ~F.text.startswith("/") &  # Исключаем команды
@@ -974,29 +858,23 @@ async def handle_link(message: types.Message, state: FSMContext):
 # === 🚀 ЗАПУСК: ГИБКИЙ РЕЖИМ ===
 async def main():
     logger.info("🚀 Запуск бота...")
-    
     if WEBHOOK_HOST:
         # === Режим Webhook (для Railway) ===
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
         import aiohttp.web
-
         WEBHOOK_PATH = "/"
         WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"✅ Webhook установлен на {WEBHOOK_URL}")
-
         app = aiohttp.web.Application()
         webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-
         port = int(os.getenv("PORT", 8000))
         runner = aiohttp.web.AppRunner(app)
         await runner.setup()
         site = aiohttp.web.TCPSite(runner, host="0.0.0.0", port=port)
         await site.start()
         logger.info(f"📡 Webhook-сервер запущен на порту {port}")
-
         try:
             while True:
                 await asyncio.sleep(3600)
