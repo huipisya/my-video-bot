@@ -21,7 +21,7 @@ import yt_dlp
 import instaloader
 import pickle
 import sys
-
+ 
 sys.stdout.reconfigure(encoding='utf-8')
 
 # === 🧰 ЛОГИРОВАНИЕ ===
@@ -141,6 +141,122 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
 
 # === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ ===
 
+async def download_instagram_api_direct(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """
+    Метод через прямой API Instagram с параметром ?__a=1
+    Самый быстрый и надежный метод для публичных постов
+    """
+    try:
+        logger.info("🔄 Instagram: попытка через API Direct (?__a=1)...")
+        
+        # Формируем правильный URL
+        if '/reel/' in url or '/share/' in url:
+            api_url = f"https://www.instagram.com/reel/{shortcode}/?__a=1&__d=dis"
+        else:
+            api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://www.instagram.com/',
+            }
+            
+            async with session.get(api_url, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.warning(f"API Direct вернул статус {resp.status}")
+                    return None, None, None
+                
+                try:
+                    data = await resp.json()
+                except:
+                    logger.warning("Не удалось распарсить JSON от API Direct")
+                    return None, None, None
+                
+                # Извлекаем медиа из разных возможных структур
+                media = None
+                
+                # Пробуем разные пути к данным
+                if 'graphql' in data:
+                    media = data['graphql'].get('shortcode_media', {})
+                elif 'items' in data:
+                    media = data['items'][0] if data['items'] else {}
+                else:
+                    logger.warning("Неизвестная структура ответа API Direct")
+                    return None, None, None
+                
+                if not media:
+                    return None, None, None
+                
+                is_video = media.get('is_video', False)
+                
+                # Обработка карусели (несколько фото/видео)
+                carousel = media.get('edge_sidecar_to_children', {}).get('edges', [])
+                
+                if carousel:
+                    logger.info(f"📸 Обнаружена карусель с {len(carousel)} элементами")
+                    photos = []
+                    videos = []
+                    
+                    for item in carousel[:10]:  # Ограничиваем 10 элементами
+                        node = item.get('node', {})
+                        item_is_video = node.get('is_video', False)
+                        
+                        if item_is_video:
+                            video_url = node.get('video_url')
+                            if video_url:
+                                videos.append(video_url)
+                        else:
+                            img_url = node.get('display_url')
+                            if img_url:
+                                photo_path = os.path.join(
+                                    tempfile.gettempdir(), 
+                                    f"insta_api_{shortcode}_{len(photos)}.jpg"
+                                )
+                                if await download_file(img_url, photo_path):
+                                    photos.append(photo_path)
+                    
+                    # Если есть видео в карусели, скачиваем первое
+                    if videos:
+                        video_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}.mp4")
+                        if await download_file(videos[0], video_path):
+                            return (video_path, None, None)
+                    
+                    # Если только фото
+                    if photos:
+                        caption = media.get('edge_media_to_caption', {}).get('edges', [])
+                        description = caption[0]['node']['text'] if caption else "📸 Instagram"
+                        return (None, photos, description)
+                
+                # Обработка одиночного видео
+                elif is_video:
+                    video_url = media.get('video_url')
+                    if video_url:
+                        temp_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}.mp4")
+                        if await download_file(video_url, temp_path):
+                            logger.info("✅ Видео скачано через API Direct")
+                            return (temp_path, None, None)
+                
+                # Обработка одиночного фото
+                else:
+                    img_url = media.get('display_url')
+                    if img_url:
+                        photo_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}.jpg")
+                        if await download_file(img_url, photo_path):
+                            caption = media.get('edge_media_to_caption', {}).get('edges', [])
+                            description = caption[0]['node']['text'] if caption else "📸 Instagram"
+                            logger.info("✅ Фото скачано через API Direct")
+                            return (None, [photo_path], description)
+    
+    except asyncio.TimeoutError:
+        logger.error("⏱️ Таймаут при запросе к API Direct")
+    except Exception as e:
+        logger.error(f"❌ Instagram API Direct: {e}")
+    
+    return None, None, None
+
+
 async def download_instagram_embedder(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """Метод через публичный эмбед Instagram"""
     try:
@@ -165,6 +281,7 @@ async def download_instagram_embedder(url: str, shortcode: str) -> Tuple[Optiona
                         video_url = video_match.group(1).replace('\\u0026', '&')
                         temp_path = os.path.join(tempfile.gettempdir(), f"insta_embed_{shortcode}.mp4")
                         if await download_file(video_url, temp_path):
+                            logger.info("✅ Видео скачано через Embed")
                             return (temp_path, None, None)
                     
                     # Ищем display_url для фото
@@ -173,72 +290,97 @@ async def download_instagram_embedder(url: str, shortcode: str) -> Tuple[Optiona
                         image_url = image_match.group(1).replace('\\u0026', '&')
                         photo_path = os.path.join(tempfile.gettempdir(), f"insta_embed_{shortcode}.jpg")
                         if await download_file(image_url, photo_path):
+                            logger.info("✅ Фото скачано через Embed")
                             return (None, [photo_path], "📸 Instagram")
     except Exception as e:
         logger.error(f"❌ Instagram Embed: {e}")
     return None, None, None
 
-async def download_instagram_oembed(url: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    """Метод через официальный oEmbed API"""
-    try:
-        logger.info("🔄 Instagram: попытка через oEmbed...")
-        oembed_url = f"https://api.instagram.com/oembed/?url={url}"
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-            async with session.get(oembed_url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    thumbnail_url = data.get('thumbnail_url')
-                    
-                    if thumbnail_url:
-                        # Получаем HTML страницы для видео
-                        async with session.get(url, headers={
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                        }) as page_resp:
-                            if page_resp.status == 200:
-                                html = await page_resp.text()
-                                video_match = re.search(r'"video_url":"([^"]+)"', html)
-                                if video_match:
-                                    video_url = video_match.group(1).replace('\\/', '/')
-                                    shortcode = re.search(r'/(?:p|reel)/([^/]+)', url).group(1)
-                                    temp_path = os.path.join(tempfile.gettempdir(), f"insta_oembed_{shortcode}.mp4")
-                                    if await download_file(video_url, temp_path):
-                                        return (temp_path, None, None)
-    except Exception as e:
-        logger.error(f"❌ Instagram oEmbed: {e}")
-    return None, None, None
 
 async def download_instagram_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """Метод через yt-dlp с поддержкой cookies"""
     try:
         logger.info("🔄 Instagram: попытка через yt-dlp...")
+        
         ydl_opts = {
             'format': 'best',
             'noplaylist': True,
             'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
+            'socket_timeout': 30,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
         }
+        
         # Используем cookies, если они есть
         cookies_file = Path("cookies.txt")
         if cookies_file.exists():
             ydl_opts['cookiefile'] = str(cookies_file)
-            logger.info("✅ Используются куки из cookies.txt (yt-dlp)")
+            logger.info("✅ Используются куки из cookies.txt")
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             if temp_file and os.path.exists(temp_file):
+                logger.info("✅ Скачано через yt-dlp")
                 return (temp_file, None, None)
     except Exception as e:
         logger.error(f"❌ Instagram yt-dlp: {e}")
     return None, None, None
 
+
+async def download_instagram_reels_mobile(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """
+    Специальный метод для Reels с эмуляцией мобильного устройства
+    Работает с URL типа /share/ и /reel/
+    """
+    try:
+        logger.info("🔄 Instagram Reels: попытка через мобильный API...")
+        
+        # Преобразуем /share/ URL в правильный формат
+        if '/share/' in url:
+            reel_url = f"https://www.instagram.com/reel/{shortcode}/"
+        else:
+            reel_url = url
+        
+        # Добавляем параметр API
+        api_url = f"{reel_url.rstrip('/')}/?__a=1&__d=dis"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            headers = {
+                'User-Agent': 'Instagram 219.0.0.12.117 Android',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US',
+                'X-IG-App-ID': '936619743392459',
+                'X-ASBD-ID': '198387',
+                'X-IG-WWW-Claim': '0',
+            }
+            
+            async with session.get(api_url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    
+                    # Извлекаем видео из ответа
+                    items = data.get('items', [])
+                    if items:
+                        video_url = items[0].get('video_versions', [{}])[0].get('url')
+                        if video_url:
+                            temp_path = os.path.join(tempfile.gettempdir(), f"insta_reel_{shortcode}.mp4")
+                            if await download_file(video_url, temp_path):
+                                logger.info("✅ Reels скачан через мобильный API")
+                                return (temp_path, None, None)
+    except Exception as e:
+        logger.error(f"❌ Instagram Reels мобильный: {e}")
+    return None, None, None
+
+
 async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """Метод через библиотеку Instaloader"""
     try:
         logger.info("🔄 Instagram: попытка через Instaloader...")
+        
         L = instaloader.Instaloader(
             download_videos=True,
             download_pictures=True,
@@ -247,361 +389,106 @@ async def download_instagram_instaloader(url: str, shortcode: str) -> Tuple[Opti
             save_metadata=False,
             quiet=True
         )
-        # Используем cookies, если они есть
-        cookies_file = Path("cookies.txt")
-        if cookies_file.exists():
-            # L.load_session_from_file("your_username_or_session_name", str(cookies_file)) # Замените на реальный username или укажите файл сессии
-            logger.info("✅ Используется сессия из cookies.txt (Instaloader)")
-
+        
         post = instaloader.Post.from_shortcode(L.context, shortcode)
 
         if post.is_video:
             video_url = post.video_url
-            temp_path = os.path.join(tempfile.gettempdir(), f"insta_{shortcode}.mp4")
+            temp_path = os.path.join(tempfile.gettempdir(), f"insta_loader_{shortcode}.mp4")
             if await download_file(video_url, temp_path):
+                logger.info("✅ Видео скачано через Instaloader")
                 return (temp_path, None, None)
         else:
             photos = []
-            description = post.caption or "Без описания"
+            description = post.caption or "📸 Instagram"
+            
+            # Обработка карусели
             if post.typename == "GraphSidecar":
                 for i, node in enumerate(post.get_sidecar_nodes()):
                     if node.is_video or i >= 10:
                         continue
-                    photo_path = os.path.join(tempfile.gettempdir(), f"insta_{shortcode}_{i}.jpg")
+                    photo_path = os.path.join(tempfile.gettempdir(), f"insta_loader_{shortcode}_{i}.jpg")
                     if await download_file(node.display_url, photo_path):
                         photos.append(photo_path)
             else:
-                photo_path = os.path.join(tempfile.gettempdir(), f"insta_{shortcode}.jpg")
+                photo_path = os.path.join(tempfile.gettempdir(), f"insta_loader_{shortcode}.jpg")
                 if await download_file(post.url, photo_path):
                     photos.append(photo_path)
+            
             if photos:
+                logger.info(f"✅ {len(photos)} фото скачано через Instaloader")
                 return (None, photos, description)
     except Exception as e:
         logger.error(f"❌ Instagram Instaloader: {e}")
     return None, None, None
 
-async def download_instagram_api(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    try:
-        logger.info("🔄 Instagram: попытка через API...")
-        api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-        async with aiohttp.ClientSession() as session:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            async with session.get(api_url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    media = data.get('graphql', {}).get('shortcode_media', {})
-                    if media.get('is_video'):
-                        video_url = media.get('video_url')
-                        if video_url:
-                            temp_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}.mp4")
-                            if await download_file(video_url, temp_path):
-                                return (temp_path, None, None)
-                    else:
-                        photos = []
-                        edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
-                        if edges:
-                            for i, edge in enumerate(edges[:10]):
-                                node = edge.get('node', {})
-                                img_url = node.get('display_url')
-                                if img_url:
-                                    photo_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}_{i}.jpg")
-                                    if await download_file(img_url, photo_path):
-                                        photos.append(photo_path)
-                        else:
-                            img_url = media.get('display_url')
-                            if img_url:
-                                photo_path = os.path.join(tempfile.gettempdir(), f"insta_api_{shortcode}.jpg")
-                                if await download_file(img_url, photo_path):
-                                    photos.append(photo_path)
-                        if photos:
-                            description = media.get('edge_media_to_caption', {}).get('edges', [{}])[0].get('node', {}).get('text', 'Без описания')
-                            return (None, photos, description)
-    except Exception as e:
-        logger.error(f"❌ Instagram API: {e}")
-    return None, None, None
 
-# --- 🆕 НОВЫЙ МЕТОД ДЛЯ REELS С МОБИЛЬНОЙ ЭМУЛЯЦИЕЙ ---
-async def download_instagram_reels_ytdlp(url: str, quality: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    """Надежный метод для скачивания Reels через yt-dlp с эмуляцией мобильного устройства."""
-    try:
-        logger.info("🔄 Instagram Reels: попытка через yt-dlp (мобильный режим)...")
-
-        # Попробуем получить shortcode из /share/ URL
-        share_match = re.search(r'/share/([^/]+)', url)
-        if share_match:
-            shortcode = share_match.group(1)
-            # Составляем правильный URL для рилса
-            reel_url = f"https://www.instagram.com/reel/{shortcode}/"
-            logger.info(f"🔄 Переведен URL /share/ в /reel/: {reel_url}")
-        else:
-            # Если это не /share/, используем исходный URL
-            reel_url = url
-
-        ydl_opts = {
-            'format': 'best',
-            'noplaylist': True,
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-                'Referer': 'https://www.instagram.com/',
-                'Origin': 'https://www.instagram.com',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-            # Добавим опцию для работы с Reels
-            'extractor_args': {
-                'instagram': {
-                    'skip_download': False
-                }
-            }
-        }
-
-        # Если есть cookies.txt, используем их
-        cookies_file = Path("cookies.txt")
-        if cookies_file.exists():
-            ydl_opts['cookiefile'] = str(cookies_file)
-            logger.info("✅ Используются куки из cookies.txt (Reels)")
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(reel_url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            if temp_file and os.path.exists(temp_file):
-                return (temp_file, None, None)
-
-    except Exception as e:
-        logger.error(f"❌ Instagram Reels yt-dlp: {e}")
-    return None, None, None
-
-# --- 🆕 НОВЫЕ МЕТОДЫ ЧЕРЕЗ СТОРОННИЕ СЕРВИСЫ ---
-async def get_video_from_third_party(url: str, service_name: str, service_func) -> Optional[str]:
-    """Общая функция для получения видео через сторонний сервис."""
-    try:
-        logger.info(f"🔄 Instagram: попытка через {service_name}...")
-        video_url = await service_func(url)
-        if video_url:
-            temp_path = os.path.join(tempfile.gettempdir(), f"insta_{service_name}.mp4")
-            if await download_file(video_url, temp_path):
-                logger.info(f"✅ Видео получено через {service_name}")
-                return temp_path
-    except Exception as e:
-        logger.error(f"❌ Ошибка при использовании {service_name}: {e}")
-    return None
-
-async def get_video_url_from_ssstik(url: str) -> Optional[str]:
-    """Получает ссылку на видео с ssstik.io"""
-    # ssstik.io часто требует реферер и может использовать JS, но попробуем простой запрос
-    # Это может не всегда работать, зависит от обфускации/JS на их стороне
-    # Пример: https://ssstik.io/abc?query=https://www.instagram.com/reel/XXXX/
-    # или https://ssstik.io/en - отправка формы
-    # Попробуем отправку формы
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://ssstik.io/en',
-            'Origin': 'https://ssstik.io',
-        }
-        # ssstik.io обычно использует POST-запрос к /abc с параметром query
-        # Нужно сначала получить страницу, чтобы получить токены/скрипты, но для простоты попробуем напрямую
-        # Сайт может изменять структуру, этот код хрупкий
-        try:
-            # Получаем страницу и пытаемся найти form-action и token
-            async with session.get('https://ssstik.io/en', headers=headers) as page_resp:
-                if page_resp.status != 200:
-                    return None
-                page_html = await page_resp.text()
-                # Ищем форму
-                match = re.search(r'<form.*?action="(.*?)".*?>', page_html, re.S)
-                if not match:
-                    return None
-                form_action = match.group(1)
-
-                # Ищем скрытое поле с токеном, например, 'token'
-                token_match = re.search(r'<input.*?name="token".*?value="(.*?)"', page_html)
-                token = token_match.group(1) if token_match else ""
-
-            # Отправляем POST-запрос
-            data = aiohttp.FormData()
-            data.add_field('id', url)
-            data.add_field('locale', 'en')
-            data.add_field('token', token) # Используем токен, если нашли
-            # ssstik может использовать динамические имена полей, это усложняет задачу
-            # Для простоты, если токен не найден, отправим без него
-            if not token:
-                data._fields = [f for f in data._fields if f[1] != 'token']
-
-            async with session.post(f'https://ssstik.io{form_action}', data=data, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                html = await resp.text()
-
-            # Ищем ссылку на видео
-            # ssstik обычно предоставляет ссылку в элементе <a> с data-url или href
-            # или через JS в атрибутах кнопки
-            # Ссылка может быть в JSON внутри скрипта
-            # Это хрупко, но пробуем
-            # Часто ссылка на видео без звука и с отдельной ссылкой на аудио
-            # Ищем ссылку на видео (обычно mp4)
-            video_match = re.search(r'download\.link.*?"(https?://[^"]*\.mp4[^"]*)"', html)
-            if video_match:
-                return video_match.group(1)
-
-            # Альтернативный паттерн
-            video_match = re.search(r'href="(https?://[^"]*\.mp4[^"]*)"[^>]*download', html)
-            if video_match:
-                return video_match.group(1)
-
-            # Паттерн для кнопки
-            button_match = re.search(r'data-url="(https?://[^"]*\.mp4[^"]*)"', html)
-            if button_match:
-                return button_match.group(1)
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка при парсинге ssstik.io: {e}")
-    return None
-
-async def get_video_url_from_ttdownloader(url: str) -> Optional[str]:
-    """Получает ссылку на видео с ttdownloader.com"""
-    # ttdownloader.com часто использует POST-запрос к /api/ajax/search
-    # и возвращает JSON с результатами
-    # Пример: POST /api/ajax/search с  { query: url, lang: 'en' }
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://ttdownloader.com/',
-            'Origin': 'https://ttdownloader.com',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
-        data = aiohttp.FormData()
-        data.add_field('query', url)
-        data.add_field('lang', 'en') # или 'en', зависит от сайта
-
-        async with session.post('https://ttdownloader.com/api/ajax/search', data=data, headers=headers) as resp:
-            if resp.status != 200:
-                return None
-            json_data = await resp.json()
-            # Результат обычно в json_data['data']
-            # Ищем ссылку на HD видео
-            # Структура JSON может меняться
-            # Пример: { "data": "<html>...<a href='...'>Download</a>...</html>" }
-            html_content = json_data.get('data', '')
-            if html_content:
-                # Ищем href в <a> тегах
-                links = re.findall(r'<a[^>]+href="(https?://[^"]+\.mp4[^"]*)"', html_content)
-                # Возвращаем первую найденную ссылку на mp4 (обычно это HD)
-                if links:
-                    return links[0]
-
-    return None
-
-async def get_video_url_from_snaptik(url: str) -> Optional[str]:
-    """Получает ссылку на видео с snaptik.app"""
-    # snaptik.app часто использует GET-запрос к /snaptik.php с параметром url
-    # и возвращает страницу с результатами
-    # Пример: GET /snaptik.php?url=...
-    # Страница может содержать ссылки в атрибутах или JS
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://snaptik.app/',
-        }
-        params = {'url': url}
-
-        async with session.get('https://snaptik.app/snaptik.php', params=params, headers=headers) as resp:
-            if resp.status != 200:
-                return None
-            html = await resp.text()
-
-        # Ищем ссылку на видео
-        # snaptik часто кодирует ссылки в base64 или прячет в JS
-        # Попробуем найти прямую ссылку
-        # Ищем ссылки в href или data-url
-        # Пример: <a href="https://...snaptik.app/download?token=..." download>
-        # или <button onclick="download_video('encoded_url')">
-        # Это может быть сложно без выполнения JS
-        # Попробуем простой паттерн для href
-        # Часто ссылка на видео без звука, аудио отдельно
-        # Ищем ссылку, содержащую "download" или "video"
-        # Пример: <a href="https://.../get_video.php?token=...&title=...&id=...">
-        # Или в base64 в JS: decodeURIComponent(atob('...'))
-        # Это хрупко
-        # Часто используется кнопка с onclick
-        # onclick="download_video('TOKEN')"
-        # И токен нужно подставить в URL: https://snaptik.app/download?token=TOKEN
-        # Попробуем найти токен
-        token_match = re.search(r"download_video\(['\"]([^'\"]+)['\"]\)", html)
-        if token_match:
-            token = token_match.group(1)
-            download_url = f"https://snaptik.app/download?token={token}"
-            # Теперь нужно получить прямую ссылку из этого download URL
-            # Иногда он ведет на страницу с <a href="...">, иногда редиректит
-            async with session.get(download_url, headers=headers) as dl_resp:
-                if dl_resp.status == 200:
-                    # Проверим, редирект ли это
-                    final_url = str(dl_resp.url)
-                    if final_url and final_url.endswith('.mp4'):
-                         return final_url
-                    # Или снова получаем HTML и ищем ссылку
-                    dl_html = await dl_resp.text()
-                    dl_link_match = re.search(r'<a[^>]+href="(https?://[^"]*\.mp4[^"]*)"', dl_html)
-                    if dl_link_match:
-                        return dl_link_match.group(1)
-
-        # Альтернативный паттерн для прямой ссылки в href
-        direct_match = re.search(r'<a[^>]+href="(https?://[^"]*\.mp4[^"]*)"[^>]*download', html)
-        if direct_match:
-            return direct_match.group(1)
-
-    return None
-
-
-# --- 🆕 ИСПРАВЛЕННАЯ ФУНКЦИЯ download_instagram С РЕЗЕРВНЫМИ СЕРВИСАМИ ---
+# === 🎯 ГЛАВНАЯ ФУНКЦИЯ СКАЧИВАНИЯ INSTAGRAM ===
 async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    # Исправленное извлечение shortcode (учитывает /share/)
-    shortcode_match = re.search(r'/(?:p|reel|share)/([^/]+)', url)
+    """
+    Главная функция для скачивания контента из Instagram.
+    Использует несколько методов в порядке надежности.
+    
+    Returns:
+        Tuple[video_path, photos_list, description/error_message]
+    """
+    # Извлекаем shortcode из URL
+    shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
     if not shortcode_match:
         return None, None, "❌ Не удалось извлечь shortcode из URL"
+    
     shortcode = shortcode_match.group(1)
-
-    # Определяем тип контента по URL
+    logger.info(f"📌 Instagram shortcode: {shortcode}")
+    
+    # Определяем тип контента
     is_reel = '/reel/' in url.lower() or '/share/' in url.lower()
-
+    is_igtv = '/tv/' in url.lower()
+    
+    # Формируем список методов в порядке приоритета
     methods = []
-
-    # Для Reels: сначала пробуем специальный метод
+    
+    # Для Reels - специальные методы в начале
     if is_reel:
-        methods.append(lambda: download_instagram_reels_ytdlp(url, quality))
-
-    # Затем остальные методы
+        methods.extend([
+            ("API Direct (Reels)", lambda: download_instagram_api_direct(url, shortcode)),
+            ("Мобильный API", lambda: download_instagram_reels_mobile(url, shortcode)),
+        ])
+    
+    # Универсальные методы
     methods.extend([
-        lambda: download_instagram_embedder(url, shortcode),
-        lambda: download_instagram_oembed(url),
-        lambda: download_instagram_ytdlp(url, quality),
-        lambda: download_instagram_instaloader(url, shortcode),
-        lambda: download_instagram_api(url, shortcode)
+        ("API Direct", lambda: download_instagram_api_direct(url, shortcode)),
+        ("Embedder", lambda: download_instagram_embedder(url, shortcode)),
+        ("yt-dlp", lambda: download_instagram_ytdlp(url, quality)),
+        ("Instaloader", lambda: download_instagram_instaloader(url, shortcode)),
     ])
-
-    # Пробуем основные методы
-    for method in methods:
-        result = await method()
-        if result and (result[0] or result[1]):
-            return result
-
-    # Если основные методы не сработали, пробуем сторонние сервисы (только для видео)
-    logger.info("🔄 Instagram: все основные методы не сработали, пробуем сторонние сервисы...")
-    third_party_methods = [
-        ("ssstik", lambda: get_video_from_third_party(url, "ssstik", get_video_url_from_ssstik)),
-        ("ttdownloader", lambda: get_video_from_third_party(url, "ttdownloader", get_video_url_from_ttdownloader)),
-        ("snaptik", lambda: get_video_from_third_party(url, "snaptik", get_video_url_from_snaptik)),
-    ]
-
-    for service_name, method in third_party_methods:
-        result_file = await method()
-        if result_file:
-            # Успешно получили файл через сторонний сервис
-            return (result_file, None, None) # Возвращаем как видео
-
-    return None, None, "❌ Не удалось скачать контент из Instagram всеми методами"
+    
+    # Пробуем все методы по очереди
+    for method_name, method in methods:
+        try:
+            logger.info(f"🔄 Пробуем метод: {method_name}")
+            result = await method()
+            
+            if result and (result[0] or result[1]):
+                logger.info(f"✅ Успешно скачано методом: {method_name}")
+                return result
+        except Exception as e:
+            logger.error(f"❌ Метод {method_name} вызвал исключение: {e}")
+            continue
+    
+    # Если все методы не сработали
+    error_msg = (
+        "❌ Не удалось скачать контент из Instagram\n\n"
+        "Возможные причины:\n"
+        "• Аккаунт приватный\n"
+        "• Контент удален или недоступен\n"
+        "• Instagram заблокировал доступ\n\n"
+        "💡 Попробуйте:\n"
+        "1. Проверить, что аккаунт публичный\n"
+        "2. Скопировать ссылку заново\n"
+        "3. Попробовать позже"
+    )
+    
+    return None, None, error_msg
 
 # === 📤 TIKTOK ФОТО ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
