@@ -839,11 +839,11 @@ def settings_keyboard() -> ReplyKeyboardMarkup:
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     welcome_text = (
-        "🎬 <b>Добро пожаловать в VideoBot!</b>\n\n"
+        "🎬 <b>Добро пожаловать в VideoBot!</b>\n"
         "Я могу скачать видео с:\n"
         "• YouTube\n"
         "• TikTok\n"
-        "• Instagram\n\n"
+        "• Instagram\n"
         "📲 Просто отправь мне ссылку!"
     )
     await message.answer(welcome_text, reply_markup=main_keyboard(), parse_mode="HTML")
@@ -853,15 +853,18 @@ async def settings_menu(message: types.Message, state: FSMContext):
     await state.set_state(VideoStates.choosing_quality)
     current = get_quality_setting(message.from_user.id)
     await message.answer(
-        f"⚙️ Текущее качество: <b>{current.upper()}</b>\n\nВыберите новое:",
+        f"⚙️ Текущее качество: <b>{current.upper()}</b>\nВыберите новое:",
         reply_markup=settings_keyboard(),
         parse_mode="HTML"
     )
 
+# --- ✅ ИСПРАВЛЕНИЕ: ОБРАБОТЧИК ДЛЯ КНОПОК НАСТРОЕК ---
+# Этот обработчик будет срабатывать ТОЛЬКО при нажатии на кнопки в меню настроек.
+# Он имеет более высокий приоритет, чем общий обработчик ссылок.
 @dp.message(VideoStates.choosing_quality, F.text.in_([
-    "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p"
+    "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p", "◀️ Назад"
 ]))
-async def set_quality(message: types.Message, state: FSMContext):
+async def handle_settings_buttons(message: types.Message, state: FSMContext):
     quality_map = {
         "🌟 Лучшее": "best",
         "🎬 1080p": "1080p",
@@ -869,21 +872,30 @@ async def set_quality(message: types.Message, state: FSMContext):
         "⚡ 480p": "480p",
         "📱 360p": "360p"
     }
-    user_settings[message.from_user.id] = quality_map[message.text]
-    await message.answer(
-        f"✅ Установлено: <b>{message.text}</b>",
-        reply_markup=main_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
 
-@dp.message(VideoStates.choosing_quality, F.text == "◀️ Назад")
-async def back_to_main(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
+    if message.text == "◀️ Назад":
+        await state.clear()
+        await message.answer("🏠 Главное меню", reply_markup=main_keyboard())
+    else:
+        user_settings[message.from_user.id] = quality_map[message.text]
+        await message.answer(
+            f"✅ Установлено: <b>{message.text}</b>",
+            reply_markup=main_keyboard(),
+            parse_mode="HTML"
+        )
+        await state.clear()
 
-# === 📥 ОБРАБОТКА ССЫЛОК (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
-@dp.message(F.text)
+# --- ✅ ИСПРАВЛЕНИЕ: ОБРАБОТЧИК ДЛЯ ССЫЛОК ---
+# Этот обработчик срабатывает ТОЛЬКО если текст НЕ является командой и НЕ соответствует кнопкам настроек.
+# Мы используем F.text & ~F.text.in_(...) для исключения кнопок.
+@dp.message(
+    F.text &  # Только текстовые сообщения
+    ~F.text.startswith("/") &  # Исключаем команды
+    ~F.text.in_([  # Исключаем все тексты кнопок
+        "⚙️ Настройки",
+        "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p", "◀️ Назад"
+    ])
+)
 async def handle_link(message: types.Message, state: FSMContext):
     url = message.text.strip()
     if not is_valid_url(url):
@@ -892,7 +904,6 @@ async def handle_link(message: types.Message, state: FSMContext):
 
     # ✅ RATE LIMITING
     await check_rate_limit(message.from_user.id)
-
     platform = detect_platform(url)
     status_msg = await message.answer(f"⏳ Обрабатываю {platform.upper()}...")
     user_quality = get_quality_setting(message.from_user.id)
@@ -902,19 +913,16 @@ async def handle_link(message: types.Message, state: FSMContext):
     try:
         if platform == 'instagram':
             temp_file, photos, description = await download_instagram(url, user_quality)
-            
             # 🔥 ИСПРАВЛЕНИЕ: Проверяем description на ошибки
             if description and "❌" in description:
                 await status_msg.edit_text(description, parse_mode="HTML")
                 return
-            
             if photos:
                 temp_photos = photos
                 await status_msg.delete()
                 success = await send_photos_with_caption(message.chat.id, photos, description)
                 cleanup_files(photos)
                 return
-            
             # 🔥 НОВОЕ: Если temp_file есть (видео скачано)
             if temp_file and os.path.exists(temp_file):
                 await status_msg.edit_text("📤 Отправляю...")
@@ -922,7 +930,6 @@ async def handle_link(message: types.Message, state: FSMContext):
                 await status_msg.delete()
                 cleanup_file(temp_file)
                 return
-            
             # 🔥 НОВОЕ: Если ничего не скачано - показываем детальную ошибку
             if not temp_file and not photos:
                 error_detail = description if description else "❌ Не удалось скачать контент"
@@ -959,7 +966,7 @@ async def handle_link(message: types.Message, state: FSMContext):
             await status_msg.edit_text(error_msg)
         except:
             pass
-    
+
     finally:
         # 🧹 ФИНАЛЬНАЯ ОЧИСТКА
         if temp_file:
