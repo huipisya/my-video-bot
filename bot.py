@@ -722,23 +722,6 @@ def settings_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-# === 🧭 КЛАВИАТУРЫ ===
-def main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="⚙️ Настройки")]],
-        resize_keyboard=True
-    )
-
-def settings_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🌟 Лучшее")],
-            [KeyboardButton(text="🎬 1080p"), KeyboardButton(text="📺 720p")],
-            [KeyboardButton(text="⚡ 480p"), KeyboardButton(text="📱 360p")],
-            [KeyboardButton(text="◀️ Назад")]
-        ],
-        resize_keyboard=True
-    )
 
 # === 🚀 КОМАНДЫ ===
 @dp.message(Command("start"))
