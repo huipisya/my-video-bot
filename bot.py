@@ -2,6 +2,7 @@ import os
 import tempfile
 import asyncio
 import logging
+import uuid
 import re
 import hashlib
 import json
@@ -1114,6 +1115,7 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
         "  4. Перезапустить Instagram на своем устройстве\n"
+        "  5. Использовать cookies пользователя (см. инструкцию в README)"
     )
     return None, None, error_msg
 
