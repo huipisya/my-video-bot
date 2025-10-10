@@ -22,7 +22,7 @@ import yt_dlp
 import instaloader
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
-
+IG_DEVICE_ID = str(uuid.uuid4())
 # === 🧰 ЛОГИРОВАНИЕ ===
 logging.basicConfig(
     level=logging.INFO,
@@ -144,7 +144,7 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
-# === 📥 СКАЧИВАНИЕ С INSTAGRAM (Максимально улучшенная версия) ===
+# === 📥 СКАЧИВАНИЕ С INSTAGRAM (Максимально улучшенная версия с IG_DEVICE_ID) ===
 
 async def extract_instagram_shortcode(url: str) -> Optional[str]:
     """
@@ -175,8 +175,8 @@ async def extract_instagram_shortcode(url: str) -> Optional[str]:
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка, yt-dlp может сгенерировать
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600', # Пример для UTC+1
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
@@ -258,8 +258,8 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600',
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
@@ -400,8 +400,8 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600',
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
@@ -520,8 +520,8 @@ async def download_instagram_web_api(url: str, shortcode: str) -> Tuple[Optional
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600',
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
@@ -686,8 +686,8 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600',
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
@@ -846,8 +846,8 @@ async def download_instagram_with_user_cookies(url: str, shortcode: str, user_id
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600',
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
@@ -980,8 +980,8 @@ async def download_instagram_ytdlp_with_user_auth(url: str, quality: str, user_i
                 'X-IG-Capabilities': '3brTvx0=',
                 'X-IG-Connection-Type': 'WIFI',
                 'X-IG-App-Startup-Country': 'US',
-                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
-                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Device-ID': IG_DEVICE_ID, # Используем переменную
+                'X-IG-Android-ID': IG_DEVICE_ID, # Используем переменную
                 'X-IG-Timezone-Offset': '3600',
                 'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
