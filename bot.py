@@ -88,7 +88,7 @@ async def check_rate_limit(user_id: int):
 
 def get_quality_setting(user_id: int) -> str:
     """Получает установленное качество для пользователя."""
-    return user_settings.get(user_id, "best")
+    return user_settings.get(user_id, "720p")
 
 def set_quality_setting(user_id: int, quality: str):
     """Сохраняет качество для пользователя."""
@@ -1020,7 +1020,7 @@ async def set_quality(message: types.Message, state: FSMContext):
     }
     set_quality_setting(message.from_user.id, quality_map[message.text])
     await message.answer(
-        f"✅ Установлено: <b>{message.text}</b>",
+        f"Установлено: <b>{message.text}</b>",
         reply_markup=main_keyboard(),
         parse_mode="HTML"
     )
