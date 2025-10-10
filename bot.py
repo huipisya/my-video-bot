@@ -42,9 +42,7 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === 🧠 ХРАНИЛИЩЕ НАСТРОЕК (теперь используем Redis, но для упрощения в памяти) ===
-# ВАЖНО: В оригинальном задании сказано УДАЛИТЬ REDIS ПОЛНОСТЬЮ.
-# Поэтому вместо Redis используем словарь в памяти, как в оригинальном коде.
+# === 🧠 ХРАНИЛИЩЕ НАСТРОЕК ===
 user_settings = {}
 
 RATE_LIMIT_DELAY = {}  # {user_id: last_request_time}
@@ -88,12 +86,10 @@ async def check_rate_limit(user_id: int):
         await asyncio.sleep(delay)
     RATE_LIMIT_DELAY[user_id] = time.time()
 
-# --- ИСПРАВЛЕНО: Функция получения качества теперь синхронная, использует словарь ---
 def get_quality_setting(user_id: int) -> str:
     """Получает установленное качество для пользователя."""
     return user_settings.get(user_id, "best")
 
-# --- НОВОЕ: Функция установки качества теперь синхронная, использует словарь ---
 def set_quality_setting(user_id: int, quality: str):
     """Сохраняет качество для пользователя."""
     user_settings[user_id] = quality
@@ -147,7 +143,8 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
-# === 📥 INSTAGRAM: УЛУЧШЕННЫЕ МЕТОДЫ (2025) ===
+# === 📥 СКАЧИВАНИЕ С INSTAGRAM ===
+
 async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через мобильный Instagram API (самый надежный в 2025)
@@ -155,7 +152,6 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
     """
     try:
         logger.info("🔄 Instagram: Mobile API (приоритетный метод)...")
-        # Формируем API URL
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             headers = {
@@ -187,14 +183,13 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                 except:
                     logger.warning("Не удалось распарсить JSON от Mobile API")
                     return None, None, None
-                # Извлекаем items
                 items = data.get('items', [])
                 if not items:
                     logger.warning("Mobile API: нет items в ответе")
                     return None, None, None
                 media = items[0]
                 media_type = media.get('media_type', 0)
-                # media_type: 1 = фото, 2 = видео, 8 = карусель
+                
                 # Карусель (несколько фото/видео)
                 if media_type == 8:
                     carousel_media = media.get('carousel_media', [])
@@ -204,14 +199,12 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                         videos = []
                         for idx, item in enumerate(carousel_media[:10]):
                             item_type = item.get('media_type', 0)
-                            # Видео в карусели
                             if item_type == 2:
                                 video_versions = item.get('video_versions', [])
                                 if video_versions:
                                     video_url = video_versions[0].get('url')
                                     if video_url:
                                         videos.append(video_url)
-                            # Фото в карусели
                             elif item_type == 1:
                                 img_candidates = item.get('image_versions2', {}).get('candidates', [])
                                 if img_candidates:
@@ -224,13 +217,11 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                                         if await download_file(img_url, photo_path):
                                             photos.append(photo_path)
 
-                        # Если есть видео - скачиваем первое
                         if videos:
                             video_path = os.path.join(tempfile.gettempdir(), f"insta_mobile_{shortcode}.mp4")
                             if await download_file(videos[0], video_path):
                                 logger.info("✅ Видео из карусели скачано (Mobile API)")
                                 return (video_path, None, None)
-                        # Если только фото
                         if photos:
                             caption = media.get('caption', {})
                             description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
@@ -273,7 +264,6 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
     """
     try:
         logger.info("🔄 Instagram: GraphQL API...")
-        # GraphQL query hash для media info
         query_hash = "2b0673e0dc4580674a88d426fe00ea90"
         variables = json.dumps({"shortcode": shortcode})
         graphql_url = f"https://www.instagram.com/graphql/query/?query_hash={query_hash}&variables={variables}"
@@ -298,7 +288,6 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                 if not media:
                     return None, None, None
                 is_video = media.get('is_video', False)
-                # Карусель
                 carousel = media.get('edge_sidecar_to_children', {}).get('edges', [])
                 if carousel:
                     logger.info(f"📸 Карусель GraphQL: {len(carousel)} элементов")
@@ -331,7 +320,6 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                         logger.info(f"✅ {len(photos)} фото (GraphQL)")
                         return (None, photos, description)
 
-                # Видео
                 elif is_video:
                     video_url = media.get('video_url')
                     if video_url:
@@ -340,7 +328,6 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
                             logger.info("✅ Видео скачано (GraphQL)")
                             return (video_path, None, None)
 
-                # Фото
                 else:
                     img_url = media.get('display_url')
                     if img_url:
@@ -371,7 +358,6 @@ async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[
                 if resp.status != 200:
                     return None, None, None
                 html = await resp.text()
-                # Ищем video_url
                 video_match = re.search(r'"video_url":"([^"]+)"', html)
                 if video_match:
                     video_url = video_match.group(1).replace('\\u0026', '&').replace('\\/', '/')
@@ -379,7 +365,6 @@ async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[
                     if await download_file(video_url, video_path):
                         logger.info("✅ Видео скачано (oEmbed)")
                         return (video_path, None, None)
-                # Ищем display_url для фото
                 image_match = re.search(r'"display_url":"([^"]+)"', html)
                 if image_match:
                     image_url = image_match.group(1).replace('\\u0026', '&').replace('\\/', '/')
@@ -416,13 +401,11 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
             'geo_bypass': True,
             'geo_bypass_country': 'US',
         }
-        # Используем cookies если есть
         cookies_file = Path("cookies.txt")
         if cookies_file.exists():
             ydl_opts['cookiefile'] = str(cookies_file)
             logger.info("✅ Используются cookies для обхода ограничений")
 
-        # Прокси если настроен
         proxy = os.getenv("PROXY_URL")
         if proxy:
             ydl_opts['proxy'] = proxy
@@ -460,7 +443,6 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
             quiet=True,
             user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
         )
-        # Пытаемся загрузить сессию если есть
         session_file = Path("session/instagram_session")
         if session_file.exists():
             try:
@@ -502,38 +484,222 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
         logger.error(f"❌ Instagram Instaloader: {e}")
     return None, None, None
 
-# === 🎯 ГЛАВНАЯ ФУНКЦИЯ СКАЧИВАНИЯ INSTAGRAM (ОБНОВЛЕННАЯ) ===
-async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+async def download_instagram_with_user_cookies(url: str, shortcode: str, user_id: int) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """
+    Метод с использованием cookies пользователя (обходит 18+)
+    Файл должен быть: session/{user_id}_instagram_cookies.txt
+    """
+    try:
+        logger.info(f"🔄 Instagram: метод с cookies пользователя {user_id}...")
+        
+        cookies_file = Path(f"session/{user_id}_instagram_cookies.txt")
+        if not cookies_file.exists():
+            logger.info(f"⚠️ Cookies для user {user_id} не найдены")
+            return None, None, None
+            
+        cookies = {}
+        with open(cookies_file, 'r') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip():
+                    continue
+                try:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 7:
+                        cookies[parts[5]] = parts[6]
+                except:
+                    continue
+        
+        if not cookies:
+            logger.warning(f"⚠️ cookies для user {user_id} пустые")
+            return None, None, None
+            
+        api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
+        
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+            cookies=cookies
+        ) as session:
+            headers = {
+                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US',
+                'X-IG-App-ID': '567067343352427',
+                'X-IG-WWW-Claim': '0',
+                'X-ASBD-ID': '129477',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+            }
+            
+            async with session.get(api_url, headers=headers) as resp:
+                if resp.status == 404:
+                    return None, None, None
+                if resp.status != 200:
+                    logger.warning(f"API с cookies user {user_id}: статус {resp.status}")
+                    return None, None, None
+                    
+                try:
+                    data = await resp.json()
+                except:
+                    return None, None, None
+                    
+                items = data.get('items', [])
+                if not items:
+                    return None, None, None
+                    
+                media = items[0]
+                media_type = media.get('media_type', 0)
+                
+                # Видео
+                if media_type == 2:
+                    video_versions = media.get('video_versions', [])
+                    if video_versions:
+                        video_url = video_versions[0].get('url')
+                        if video_url:
+                            video_path = os.path.join(tempfile.gettempdir(), f"insta_userauth_{shortcode}.mp4")
+                            if await download_file(video_url, video_path):
+                                logger.info(f"✅ 18+ видео скачано (cookies user {user_id})")
+                                return (video_path, None, None)
+                
+                # Карусель
+                elif media_type == 8:
+                    carousel_media = media.get('carousel_media', [])
+                    videos = []
+                    photos = []
+                    
+                    for idx, item in enumerate(carousel_media[:10]):
+                        item_type = item.get('media_type', 0)
+                        if item_type == 2:
+                            video_versions = item.get('video_versions', [])
+                            if video_versions:
+                                video_url = video_versions[0].get('url')
+                                if video_url:
+                                    videos.append(video_url)
+                        elif item_type == 1:
+                            img_candidates = item.get('image_versions2', {}).get('candidates', [])
+                            if img_candidates:
+                                img_url = img_candidates[0].get('url')
+                                if img_url:
+                                    photo_path = os.path.join(
+                                        tempfile.gettempdir(), 
+                                        f"insta_userauth_{shortcode}_{idx}.jpg"
+                                    )
+                                    if await download_file(img_url, photo_path):
+                                        photos.append(photo_path)
+                    
+                    if videos:
+                        video_path = os.path.join(tempfile.gettempdir(), f"insta_userauth_{shortcode}.mp4")
+                        if await download_file(videos[0], video_path):
+                            logger.info(f"✅ 18+ видео из карусели (cookies user {user_id})")
+                            return (video_path, None, None)
+                    
+                    if photos:
+                        caption = media.get('caption', {})
+                        description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
+                        logger.info(f"✅ 18+ фото скачано (cookies user {user_id}): {len(photos)}")
+                        return (None, photos, description)
+                
+                # Фото
+                elif media_type == 1:
+                    img_candidates = media.get('image_versions2', {}).get('candidates', [])
+                    if img_candidates:
+                        img_url = img_candidates[0].get('url')
+                        if img_url:
+                            photo_path = os.path.join(tempfile.gettempdir(), f"insta_userauth_{shortcode}.jpg")
+                            if await download_file(img_url, photo_path):
+                                caption = media.get('caption', {})
+                                description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
+                                logger.info(f"✅ 18+ фото скачано (cookies user {user_id})")
+                                return (None, [photo_path], description)
+                                
+    except Exception as e:
+        logger.error(f"❌ Instagram с cookies user {user_id}: {e}")
+    
+    return None, None, None
+
+async def download_instagram_ytdlp_with_user_auth(url: str, quality: str, user_id: int) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """
+    yt-dlp с cookies пользователя для обхода 18+
+    """
+    try:
+        logger.info(f"🔄 Instagram: yt-dlp с cookies user {user_id}...")
+        
+        cookies_file = Path(f"session/{user_id}_instagram_cookies.txt")
+        if not cookies_file.exists():
+            logger.info(f"⚠️ Cookies для user {user_id} не найдены")
+            return None, None, None
+        
+        ydl_opts = {
+            'format': 'best',
+            'noplaylist': True,
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'quiet': False,
+            'no_warnings': False,
+            'socket_timeout': 30,
+            'retries': 5,
+            'fragment_retries': 5,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.instagram.com/',
+                'DNT': '1',
+            },
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'age_limit': None,
+            'skip_unavailable_fragments': True,
+            'cookiefile': str(cookies_file),
+        }
+        
+        proxy = os.getenv("PROXY_URL")
+        if proxy:
+            ydl_opts['proxy'] = proxy
+            
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            temp_file = ydl.prepare_filename(info)
+            if temp_file and os.path.exists(temp_file):
+                logger.info(f"✅ 18+ контент скачан через yt-dlp (cookies user {user_id})")
+                return (temp_file, None, None)
+                
+    except yt_dlp.utils.DownloadError as e:
+        error_str = str(e).lower()
+        if 'inappropriate' not in error_str and '18+' not in error_str:
+            logger.error(f"❌ yt-dlp user auth error: {e}")
+    except Exception as e:
+        logger.error(f"❌ Instagram yt-dlp user auth: {e}")
+    
+    return None, None, None
+
+async def download_instagram(url: str, quality: str = "best", user_id: Optional[int] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Главная функция для скачивания контента из Instagram.
-    Использует 5 методов в порядке надежности (2025).
-    Returns:
-        Tuple[video_path, photos_list, description/error_message]
+    Сначала пробует методы без авторизации, потом с cookies пользователя (если есть).
+    
+    Args:
+        url: Ссылка на Instagram
+        quality: Качество видео
+        user_id: ID пользователя (для проверки наличия cookies)
     """
-    # Извлекаем shortcode из URL
     shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
     if not shortcode_match:
         return None, None, "❌ Не удалось извлечь shortcode из URL"
+    
     shortcode = shortcode_match.group(1)
     logger.info(f"📌 Instagram shortcode: {shortcode}")
-
-    # Используем переданное качество
-    quality_to_use = quality
-
-    # Определяем тип контента
-    is_reel = '/reel/' in url.lower() or '/share/' in url.lower()
-
-    # Формируем список методов в порядке приоритета (2025)
-    methods = [
+    
+    # ФАЗА 1: Стандартные методы БЕЗ авторизации
+    standard_methods = [
         ("Mobile API", lambda: download_instagram_mobile_api(url, shortcode)),
         ("GraphQL", lambda: download_instagram_graphql(url, shortcode)),
-        ("yt-dlp Premium", lambda: download_instagram_ytdlp_premium(url, quality_to_use)),
+        ("yt-dlp Premium", lambda: download_instagram_ytdlp_premium(url, quality)),
         ("oEmbed", lambda: download_instagram_oembed(url, shortcode)),
         ("Instaloader Auth", lambda: download_instagram_instaloader_auth(url, shortcode)),
     ]
-
-    # Пробуем все методы по очереди
-    for method_name, method in methods:
+    
+    logger.info("🔄 Фаза 1: Пробуем стандартные методы...")
+    for method_name, method in standard_methods:
         try:
             logger.info(f"🔄 Пробуем метод: {method_name}")
             result = await method()
@@ -541,10 +707,34 @@ async def download_instagram(url: str, quality: str = "best") -> Tuple[Optional[
                 logger.info(f"✅ Успешно скачано методом: {method_name}")
                 return result
         except Exception as e:
-            logger.error(f"❌ Метод {method_name} вызвал исключение: {e}")
+            logger.error(f"❌ Метод {method_name}: {e}")
             continue
-
-    # Если все методы не сработали - возвращаем детальное сообщение об ошибке
+    
+    # ФАЗА 2: Методы с авторизацией пользователя (только если есть user_id и cookies)
+    if user_id:
+        cookies_file = Path(f"session/{user_id}_instagram_cookies.txt")
+        if cookies_file.exists():
+            logger.info(f"🔄 Фаза 2: Пробуем методы с авторизацией user {user_id}...")
+            
+            auth_methods = [
+                ("User Cookies API", lambda: download_instagram_with_user_cookies(url, shortcode, user_id)),
+                ("yt-dlp с User Cookies", lambda: download_instagram_ytdlp_with_user_auth(url, quality, user_id)),
+            ]
+            
+            for method_name, method in auth_methods:
+                try:
+                    logger.info(f"🔄 Пробуем метод: {method_name}")
+                    result = await method()
+                    if result and (result[0] or result[1]):
+                        logger.info(f"✅ Успешно скачано методом: {method_name}")
+                        return result
+                except Exception as e:
+                    logger.error(f"❌ Метод {method_name}: {e}")
+                    continue
+        else:
+            logger.info(f"ℹ️ Cookies для user {user_id} не найдены, пропускаем методы с авторизацией")
+    
+    # Если все методы не сработали
     error_msg = (
         "<b>Не удалось скачать контент из Instagram</b>\n"
         "<b>Возможные причины:</b>\n"
@@ -794,7 +984,7 @@ def settings_keyboard() -> ReplyKeyboardMarkup:
 # === 🚀 КОМАНДЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear() # Очищаем состояние при старте
+    await state.clear()
     current_quality = get_quality_setting(message.from_user.id)
     welcome_text = (
         "🎬 <b>Добро пожаловать в VideoBot!</b>\n"
@@ -828,19 +1018,17 @@ async def set_quality(message: types.Message, state: FSMContext):
         "⚡ 480p": "480p",
         "📱 360p": "360p"
     }
-    # --- ИСПРАВЛЕНО: Используем синхронную функцию set_quality_setting ---
     set_quality_setting(message.from_user.id, quality_map[message.text])
     await message.answer(
         f"✅ Установлено: <b>{message.text}</b>",
-        reply_markup=main_keyboard(), # Возвращаемся к основной клавиатуре
+        reply_markup=main_keyboard(),
         parse_mode="HTML"
     )
-    # Явно очищаем состояние FSM (хотя это уже делается, но для уверенности)
     await state.clear()
 
 @dp.message(VideoStates.choosing_quality, F.text == "◀️ Назад")
 async def back_to_main(message: types.Message, state: FSMContext):
-    await state.clear() # Очищаем состояние
+    await state.clear()
     current_quality = get_quality_setting(message.from_user.id)
     await message.answer(
         f"🏠 Главное меню\n"
@@ -849,41 +1037,36 @@ async def back_to_main(message: types.Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-# --- ✅ ЗАМЕНИТЬ: ОБРАБОТЧИК ДЛЯ ССЫЛОК (исключает команды и кнопки настроек) ---
+# === 🔗 ОБРАБОТЧИК ССЫЛОК ===
 @dp.message(
-    F.text &  # Только текстовые сообщения
-    ~F.text.startswith("/") &  # Исключаем команды
-    ~F.text.in_([  # Исключаем все тексты кнопок
+    F.text &
+    ~F.text.startswith("/") &
+    ~F.text.in_([
         "⚙️ Настройки",
         "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p", "◀️ Назад"
     ])
 )
 async def handle_link(message: types.Message, state: FSMContext):
-    # Добавляем проверку состояния, чтобы избежать конфликтов
     if await state.get_state() is not None:
-        # Если бот находится в каком-либо состоянии FSM, игнорируем сообщение
-        # Это предотвращает обработку ссылок во время настройки
         return
-
+    
     url = message.text.strip()
     if not is_valid_url(url):
         await message.answer("⚠️ Отправьте корректную ссылку на YouTube, TikTok или Instagram")
         return
-
-    # ✅ RATE LIMITING
+    
     await check_rate_limit(message.from_user.id)
-
     platform = detect_platform(url)
     status_msg = await message.answer(f"⏳ Обрабатываю {platform.upper()}...")
-
-    user_quality = get_quality_setting(message.from_user.id) # --- ИСПРАВЛЕНО: Синхронный вызов ---
+    user_quality = get_quality_setting(message.from_user.id)
+    user_id = message.from_user.id
     temp_file = None
     temp_photos = []
-
+    
     try:
         if platform == 'instagram':
-            temp_file, photos, description = await download_instagram(url, user_quality)
-            # 🔥 ИСПРАВЛЕНИЕ: Проверяем description на ошибки
+            temp_file, photos, description = await download_instagram(url, user_quality, user_id)
+            
             if description and "❌" in description:
                 await status_msg.edit_text(description, parse_mode="HTML")
                 return
@@ -893,19 +1076,17 @@ async def handle_link(message: types.Message, state: FSMContext):
                 success = await send_photos_with_caption(message.chat.id, photos, description)
                 cleanup_files(photos)
                 return
-            # 🔥 НОВОЕ: Если temp_file есть (видео скачано)
             if temp_file and os.path.exists(temp_file):
                 await status_msg.edit_text("📤 Отправляю...")
                 await send_video_or_link(message.chat.id, temp_file)
                 await status_msg.delete()
                 cleanup_file(temp_file)
                 return
-            # 🔥 НОВОЕ: Если ничего не скачано - показываем детальную ошибку
             if not temp_file and not photos:
                 error_detail = description if description else "❌ Не удалось скачать контент"
                 await status_msg.edit_text(error_detail, parse_mode="HTML")
                 return
-
+        
         elif platform == 'tiktok':
             if '/photo/' in url.lower():
                 photos, description = await download_tiktok_photos(url)
@@ -917,18 +1098,17 @@ async def handle_link(message: types.Message, state: FSMContext):
                 else:
                     await message.answer(description)
                 return
-
-        # Для YouTube и TikTok видео
+        
         temp_file = await download_video(url, user_quality)
         if not temp_file or not os.path.exists(temp_file):
             await status_msg.edit_text("❌ Не удалось скачать видео всеми доступными методами")
             return
-
+        
         await status_msg.edit_text("📤 Отправляю...")
         await send_video_or_link(message.chat.id, temp_file)
         await status_msg.delete()
         cleanup_file(temp_file)
-
+    
     except Exception as e:
         error_msg = f"❌ Ошибка: {str(e)}"
         logger.error(error_msg)
@@ -937,7 +1117,6 @@ async def handle_link(message: types.Message, state: FSMContext):
         except:
             pass
     finally:
-        # 🧹 ФИНАЛЬНАЯ ОЧИСТКА
         if temp_file:
             cleanup_file(temp_file)
         if temp_photos:
@@ -947,7 +1126,6 @@ async def handle_link(message: types.Message, state: FSMContext):
 async def main():
     logger.info("🚀 Запуск бота...")
     if WEBHOOK_HOST:
-        # === Режим Webhook (для Railway) ===
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
         import aiohttp.web
         WEBHOOK_PATH = "/"
@@ -975,8 +1153,7 @@ async def main():
             await runner.cleanup()
             await bot.session.close()
     else:
-        # === Режим Long Polling (для локального запуска) ===
-        logger.info("🔄 Запуск в режиме long polling (локкально)")
+        logger.info("🔄 Запуск в режиме long polling (локально)")
         await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
