@@ -143,7 +143,69 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
-# === 📥 СКАЧИВАНИЕ С INSTAGRAM ===
+# === 📥 СКАЧИВАНИЕ С INSTAGRAM (Обновлённая версия) ===
+
+async def extract_instagram_shortcode(url: str) -> Optional[str]:
+    """
+    Пытается извлечь реальный Instagram shortcode через yt-dlp,
+    особенно полезно для ссылок типа /share/, которые yt-dlp может разрешить.
+    """
+    logger.info(f"🔍 Извлечение shortcode для: {url}")
+    try:
+        ydl_opts = {
+            'format': 'best',
+            'noplaylist': True,
+            'extract_flat': True,  # Не скачиваем, только метаданные
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.instagram.com/',
+                'DNT': '1',
+            },
+            'socket_timeout': 15,
+            'retries': 2,
+            'fragment_retries': 2,
+        }
+        cookies_file = Path("cookies.txt")
+        if cookies_file.exists():
+            ydl_opts['cookiefile'] = str(cookies_file)
+            logger.debug("✅ Используются глобальные cookies для извлечения shortcode")
+
+        proxy = os.getenv("PROXY_URL")
+        if proxy:
+            ydl_opts['proxy'] = proxy
+            logger.debug(f"✅ Используется прокси для извлечения shortcode: {proxy[:20]}...")
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            # yt-dlp может возвращать 'id' или 'display_id' или 'webpage_url'
+            shortcode = info.get('id') or info.get('display_id')
+            if shortcode:
+                logger.info(f"✅ Shortcode извлечён через yt-dlp: {shortcode}")
+                return shortcode
+
+            # Попробовать извлечь из URL, если yt-dlp не дал ID (редкий случай)
+            webpage_url = info.get('webpage_url')
+            if webpage_url:
+                match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', webpage_url)
+                if match:
+                    shortcode = match.group(1)
+                    logger.info(f"✅ Shortcode извлечён из резолвнутого URL yt-dlp: {shortcode}")
+                    return shortcode
+
+    except yt_dlp.utils.DownloadError as e:
+        logger.debug(f"⚠️ yt-dlp не смог извлечь shortcode (это нормально для некоторых случаев): {e}")
+        # Это не фатальная ошибка, просто возврат None
+        pass
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка при извлечении shortcode через yt-dlp: {e}")
+        # Это тоже не фатальная ошибка, возврат None
+        pass
+    return None
+
 
 async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
@@ -675,6 +737,7 @@ async def download_instagram_ytdlp_with_user_auth(url: str, quality: str, user_i
 async def download_instagram(url: str, quality: str = "best", user_id: Optional[int] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Главная функция для скачивания контента из Instagram.
+    Пытается получить реальный shortcode через yt-dlp, затем использует стандартные методы.
     Сначала пробует методы без авторизации, потом с cookies пользователя (если есть).
     
     Args:
@@ -682,11 +745,23 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         quality: Качество видео
         user_id: ID пользователя (для проверки наличия cookies)
     """
-    shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
-    if not shortcode_match:
-        return None, None, "❌ Не удалось извлечь shortcode из URL"
-    
-    shortcode = shortcode_match.group(1)
+    # 1. Попробовать извлечь shortcode через yt-dlp
+    shortcode = await extract_instagram_shortcode(url)
+    original_shortcode = shortcode # Для отладки, если yt-dlp не сработает
+
+    # 2. Если yt-dlp не сработал, используем регулярное выражение
+    if not shortcode:
+        shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
+        if not shortcode_match:
+            return None, None, "❌ Не удалось извлечь shortcode из URL. Проверьте корректность ссылки."
+        shortcode = shortcode_match.group(1)
+        logger.info(f"📌 Используем shortcode из регулярного выражения: {shortcode}")
+    else:
+        logger.info(f"📌 Используем shortcode из yt-dlp: {shortcode}")
+
+    if not original_shortcode:
+        logger.info(f"ℹ️ Shortcode был получен через yt-dlp (преобразование ссылки share/ и т.п.)")
+
     logger.info(f"📌 Instagram shortcode: {shortcode}")
     
     # ФАЗА 1: Стандартные методы БЕЗ авторизации
@@ -707,7 +782,7 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
                 logger.info(f"✅ Успешно скачано методом: {method_name}")
                 return result
         except Exception as e:
-            logger.error(f"❌ Метод {method_name}: {e}")
+            logger.error(f"❌ Метод {method_name} завершился с ошибкой: {e}")
             continue
     
     # ФАЗА 2: Методы с авторизацией пользователя (только если есть user_id и cookies)
@@ -729,7 +804,7 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
                         logger.info(f"✅ Успешно скачано методом: {method_name}")
                         return result
                 except Exception as e:
-                    logger.error(f"❌ Метод {method_name}: {e}")
+                    logger.error(f"❌ Метод {method_name} с авторизацией завершился с ошибкой: {e}")
                     continue
         else:
             logger.info(f"ℹ️ Cookies для user {user_id} не найдены, пропускаем методы с авторизацией")
@@ -741,12 +816,13 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         "  • Контент 18+ (возрастные ограничения)\n"
         "  • Приватный аккаунт\n"
         "  • Контент удален или недоступен\n"
-        "  • Instagram заблокировал доступ\n"
+        "  • Instagram заблокировал доступ (часто 403/401 ошибки)\n"
         "<b>Что делать:</b>\n"
         "  1. <a href='https://t.me/skacattthelp/2'>Попробуйте</a> отключить ограничения 18+ в настройках Instagram\n"
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
         "  4. Перезапустить Instagram на своем устройстве\n"
+        "  5. Использовать cookies пользователя (см. инструкцию в README)"
     )
     return None, None, error_msg
 
