@@ -149,6 +149,7 @@ async def extract_instagram_shortcode(url: str) -> Optional[str]:
     """
     Пытается извлечь реальный Instagram shortcode через yt-dlp,
     особенно полезно для ссылок типа /share/, которые yt-dlp может разрешить.
+    Возвращает None, если не удалось извлечь или если yt-dlp выдал ошибку доступа (например, 18+).
     """
     logger.info(f"🔍 Извлечение shortcode для: {url}")
     try:
@@ -197,7 +198,11 @@ async def extract_instagram_shortcode(url: str) -> Optional[str]:
                     return shortcode
 
     except yt_dlp.utils.DownloadError as e:
-        logger.debug(f"⚠️ yt-dlp не смог извлечь shortcode (это нормально для некоторых случаев): {e}")
+        error_str = str(e).lower()
+        if 'inappropriate' in error_str or '18+' in error_str or 'age' in error_str:
+            logger.debug(f"⚠️ yt-dlp не смог извлечь shortcode: контент 18+ или ограничен (ошибка: {e})")
+        else:
+            logger.debug(f"⚠️ yt-dlp не смог извлечь shortcode по другой причине: {e}")
         # Это не фатальная ошибка, просто возврат None
         pass
     except Exception as e:
@@ -747,9 +752,9 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     """
     # 1. Попробовать извлечь shortcode через yt-dlp
     shortcode = await extract_instagram_shortcode(url)
-    original_shortcode = shortcode # Для отладки, если yt-dlp не сработает
+    original_shortcode = shortcode # Сохраняем результат yt-dlp. Если None, значит регулярка.
 
-    # 2. Если yt-dlp не сработал, используем регулярное выражение
+    # 2. Если yt-dlp не сработал (вернул None), используем регулярное выражение
     if not shortcode:
         shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
         if not shortcode_match:
@@ -759,8 +764,25 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     else:
         logger.info(f"📌 Используем shortcode из yt-dlp: {shortcode}")
 
-    if not original_shortcode:
-        logger.info(f"ℹ️ Shortcode был получен через yt-dlp (преобразование ссылки share/ и т.п.)")
+    # Проверяем, был ли shortcode получен *успешно* через yt-dlp (преобразование ссылки)
+    # Это будет верно, если yt-dlp не вернул None и не выдал ошибку 18+ при извлечении.
+    # original_shortcode == shortcode означает, что yt-dlp дал результат, который не None.
+    # (Предыдущая логика была: if not original_shortcode. Теперь: if original_shortcode is not None and original_shortcode == shortcode)
+    # Но на самом деле, если extract_instagram_shortcode вернул shortcode, значит, он его как-то получил (или из 'id', или из 'webpage_url').
+    # Логика "преобразование" важна, если регулярка из *оригинального* URL дает *другой* shortcode, чем тот, что вернул yt-dlp из 'webpage_url'.
+    # Давайте сравним с результатом регулярки из оригинального URL.
+    regex_shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
+    regex_shortcode = regex_shortcode_match.group(1) if regex_shortcode_match else None
+
+    if shortcode and original_shortcode and shortcode == original_shortcode and regex_shortcode and shortcode != regex_shortcode:
+         logger.info(f"ℹ️ Shortcode '{shortcode}' был получен через yt-dlp (преобразование ссылки, например, share/ -> reel/)")
+    elif shortcode and original_shortcode and shortcode == original_shortcode:
+         # Это случай, когда yt-dlp вернул shortcode, но он совпадает с тем, что дала регулярка (редкий, но возможный)
+         logger.info(f"ℹ️ Shortcode '{shortcode}' был получен через yt-dlp (не преобразование, но yt-dlp успешно сработал)")
+    elif not original_shortcode:
+         # Это случай, когда yt-dlp вернул None (например, из-за 18+ или другой ошибки), использована регулярка
+         logger.info(f"ℹ️ Shortcode '{shortcode}' был получен через регулярное выражение (yt-dlp не сработал)")
+
 
     logger.info(f"📌 Instagram shortcode: {shortcode}")
     
