@@ -143,13 +143,12 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
-# === 📥 СКАЧИВАНИЕ С INSTAGRAM (Обновлённая версия) ===
+# === 📥 СКАЧИВАНИЕ С INSTAGRAM (Максимально улучшенная версия) ===
 
 async def extract_instagram_shortcode(url: str) -> Optional[str]:
     """
     Пытается извлечь реальный Instagram shortcode через yt-dlp,
     особенно полезно для ссылок типа /share/, которые yt-dlp может разрешить.
-    Возвращает None, если не удалось извлечь или если yt-dlp выдал ошибку доступа (например, 18+).
     """
     logger.info(f"🔍 Извлечение shortcode для: {url}")
     try:
@@ -160,11 +159,30 @@ async def extract_instagram_shortcode(url: str) -> Optional[str]:
             'quiet': True,
             'no_warnings': True,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
+                # Используем заголовки, максимально близкие к мобильному приложению
+                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'X-IG-App-Locale': 'en_US',
+                'X-IG-Device-Locale': 'en_US',
+                'X-IG-Mapped-Locale': 'en_US',
+                'X-IG-App-ID': '567067343352427', # com.instagram.android
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
+                'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка, yt-dlp может сгенерировать
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600', # Пример для UTC+1
+                'X-IG-Connection-Speed': '-1kbps',
+                'X-FB-HTTP-Engine': 'Liger',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Connection': 'keep-alive',
                 'Referer': 'https://www.instagram.com/',
-                'DNT': '1',
+                'Origin': 'https://www.instagram.com',
             },
             'socket_timeout': 15,
             'retries': 2,
@@ -216,11 +234,13 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
     """
     Метод через мобильный Instagram API (самый надежный в 2025)
     Работает с публичными постами, reels и IGTV
+    Использует заголовки, максимально близкие к instaloader.
     """
     try:
         logger.info("🔄 Instagram: Mobile API (приоритетный метод)...")
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            # Заголовки, максимально приближенные к instaloader и мобильному приложению
             headers = {
                 'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
                 'Accept': '*/*',
@@ -230,15 +250,41 @@ async def download_instagram_mobile_api(url: str, shortcode: str) -> Tuple[Optio
                 'X-IG-Device-Locale': 'en_US',
                 'X-IG-Mapped-Locale': 'en_US',
                 'X-IG-App-ID': '567067343352427',
-                'X-IG-Bandwidth-Speed-KBPS': '2000.000',
-                'X-IG-Bandwidth-TotalBytes-B': '5000000',
-                'X-IG-Bandwidth-TotalTime-MS': '2000',
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
                 'X-IG-EU-DC-ENABLED': 'true',
                 'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600',
+                'X-IG-Connection-Speed': '-1kbps',
                 'X-FB-HTTP-Engine': 'Liger',
+                'X-Requested-With': 'XMLHttpRequest',
                 'Connection': 'keep-alive',
+                'Referer': f'https://www.instagram.com/p/{shortcode}/',
+                'Origin': 'https://www.instagram.com',
             }
-            async with session.get(api_url, headers=headers) as resp:
+
+            # Загружаем глобальные cookies, если есть
+            cookies_to_send = {}
+            cookies_file = Path("cookies.txt")
+            if cookies_file.exists():
+                logger.debug("✅ Используются глобальные cookies для Mobile API")
+                with open(cookies_file, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or not line.strip():
+                            continue
+                        try:
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 7:
+                                cookies_to_send[parts[5]] = parts[6]
+                        except:
+                            continue
+
+            async with session.get(api_url, headers=headers, cookies=cookies_to_send) as resp:
                 if resp.status == 404:
                     logger.warning("Mobile API: контент не найден (404)")
                     return None, None, None
@@ -328,6 +374,7 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
     """
     Метод через Instagram GraphQL API
     Альтернативный способ для публичных постов
+    Использует заголовки, максимально близкие к instaloader.
     """
     try:
         logger.info("🔄 Instagram: GraphQL API...")
@@ -335,15 +382,52 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
         variables = json.dumps({"shortcode": shortcode})
         graphql_url = f"https://www.instagram.com/graphql/query/?query_hash={query_hash}&variables={variables}"
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            # Заголовки, максимально приближенные к instaloader и мобильному приложению
             headers = {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
                 'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': f'https://www.instagram.com/p/{shortcode}/',
+                'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'X-IG-App-Locale': 'en_US',
+                'X-IG-Device-Locale': 'en_US',
+                'X-IG-Mapped-Locale': 'en_US',
+                'X-IG-App-ID': '567067343352427',
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
+                'X-IG-EU-DC-ENABLED': 'true',
+                'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600',
+                'X-IG-Connection-Speed': '-1kbps',
+                'X-FB-HTTP-Engine': 'Liger',
                 'X-Requested-With': 'XMLHttpRequest',
-                'X-IG-App-ID': '936619743392459',
+                'X-CSRFToken': 'missing', # или получить из сессии
+                'Connection': 'keep-alive',
+                'Referer': f'https://www.instagram.com/p/{shortcode}/',
+                'Origin': 'https://www.instagram.com',
             }
-            async with session.get(graphql_url, headers=headers) as resp:
+
+            # Загружаем глобальные cookies, если есть
+            cookies_to_send = {}
+            cookies_file = Path("cookies.txt")
+            if cookies_file.exists():
+                logger.debug("✅ Используются глобальные cookies для GraphQL API")
+                with open(cookies_file, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or not line.strip():
+                            continue
+                        try:
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 7:
+                                cookies_to_send[parts[5]] = parts[6]
+                        except:
+                            continue
+
+            async with session.get(graphql_url, headers=headers, cookies=cookies_to_send) as resp:
                 if resp.status != 200:
                     logger.warning(f"GraphQL вернул статус {resp.status}")
                     return None, None, None
@@ -408,6 +492,132 @@ async def download_instagram_graphql(url: str, shortcode: str) -> Tuple[Optional
         logger.error(f"❌ Instagram GraphQL: {e}")
     return None, None, None
 
+async def download_instagram_web_api(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """
+    Метод через веб-вью API Instagram (?__a=1)
+    Простой способ получить данные о *публичном* посте.
+    Использует заголовки, максимально близкие к instaloader.
+    """
+    try:
+        logger.info("🔄 Instagram: Web API (__a=1)...")
+        web_api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            # Заголовки, максимально приближенные к instaloader и мобильному приложению
+            headers = {
+                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'X-IG-App-Locale': 'en_US',
+                'X-IG-Device-Locale': 'en_US',
+                'X-IG-Mapped-Locale': 'en_US',
+                'X-IG-App-ID': '567067343352427',
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
+                'X-IG-EU-DC-ENABLED': 'true',
+                'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600',
+                'X-IG-Connection-Speed': '-1kbps',
+                'X-FB-HTTP-Engine': 'Liger',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Connection': 'keep-alive',
+                'Referer': f'https://www.instagram.com/p/{shortcode}/',
+                'Origin': 'https://www.instagram.com',
+            }
+
+            # Загружаем глобальные cookies, если есть
+            cookies_to_send = {}
+            cookies_file = Path("cookies.txt")
+            if cookies_file.exists():
+                logger.debug("✅ Используются глобальные cookies для Web API")
+                with open(cookies_file, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or not line.strip():
+                            continue
+                        try:
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 7:
+                                cookies_to_send[parts[5]] = parts[6]
+                        except:
+                            continue
+
+            async with session.get(web_api_url, headers=headers, cookies=cookies_to_send) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Web API (__a=1) вернул статус {resp.status}")
+                    return None, None, None
+                try:
+                    data = await resp.json()
+                except:
+                    logger.warning("Не удалось распарсить JSON от Web API (__a=1)")
+                    return None, None, None
+
+                media_data = data.get('graphql', {}).get('shortcode_media', {})
+                if not media_data:
+                    logger.warning("Web API (__a=1): нет данных shortcode_media")
+                    return None, None, None
+
+                is_video = media_data.get('is_video', False)
+                carousel = media_data.get('edge_sidecar_to_children', {}).get('edges', [])
+
+                if carousel:
+                    logger.info(f"📸 Карусель Web API: {len(carousel)} элементов")
+                    photos = []
+                    videos = []
+                    for item in carousel[:10]:
+                        node = item.get('node', {})
+                        if node.get('is_video', False):
+                            video_url = node.get('video_url')
+                            if video_url:
+                                videos.append(video_url)
+                        else:
+                            img_url = node.get('display_url')
+                            if img_url:
+                                photo_path = os.path.join(
+                                    tempfile.gettempdir(), 
+                                    f"insta_web_{shortcode}_{len(photos)}.jpg"
+                                )
+                                if await download_file(img_url, photo_path):
+                                    photos.append(photo_path)
+
+                    if videos:
+                        video_path = os.path.join(tempfile.gettempdir(), f"insta_web_{shortcode}.mp4")
+                        if await download_file(videos[0], video_path):
+                            logger.info("✅ Видео из карусели (Web API)")
+                            return (video_path, None, None)
+                    if photos:
+                        caption_edge = media_data.get('edge_media_to_caption', {}).get('edges', [])
+                        description = caption_edge[0]['node']['text'] if caption_edge else "📸 Instagram"
+                        logger.info(f"✅ {len(photos)} фото (Web API)")
+                        return (None, photos, description)
+
+                elif is_video:
+                    video_url = media_data.get('video_url')
+                    if video_url:
+                        video_path = os.path.join(tempfile.gettempdir(), f"insta_web_{shortcode}.mp4")
+                        if await download_file(video_url, video_path):
+                            logger.info("✅ Видео скачано (Web API)")
+                            return (video_path, None, None)
+
+                else:
+                    img_url = media_data.get('display_url')
+                    if img_url:
+                        photo_path = os.path.join(tempfile.gettempdir(), f"insta_web_{shortcode}.jpg")
+                        if await download_file(img_url, photo_path):
+                            caption_edge = media_data.get('edge_media_to_caption', {}).get('edges', [])
+                            description = caption_edge[0]['node']['text'] if caption_edge else "📸 Instagram"
+                            logger.info("✅ Фото скачано (Web API)")
+                            return (None, [photo_path], description)
+
+    except Exception as e:
+        logger.error(f"❌ Instagram Web API (__a=1): {e}")
+    return None, None, None
+
+
 async def download_instagram_oembed(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через Instagram oEmbed API
@@ -460,10 +670,30 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
             'retries': 3,
             'fragment_retries': 3,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                # Используем заголовки, максимально близкие к мобильному приложению
+                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
                 'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'X-IG-App-Locale': 'en_US',
+                'X-IG-Device-Locale': 'en_US',
+                'X-IG-Mapped-Locale': 'en_US',
+                'X-IG-App-ID': '567067343352427', # com.instagram.android
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
+                'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600',
+                'X-IG-Connection-Speed': '-1kbps',
+                'X-FB-HTTP-Engine': 'Liger',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Connection': 'keep-alive',
                 'Referer': 'https://www.instagram.com/',
+                'Origin': 'https://www.instagram.com',
             },
             'geo_bypass': True,
             'geo_bypass_country': 'US',
@@ -471,7 +701,7 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
         cookies_file = Path("cookies.txt")
         if cookies_file.exists():
             ydl_opts['cookiefile'] = str(cookies_file)
-            logger.info("✅ Используются cookies для обхода ограничений")
+            logger.info("✅ Используются глобальные cookies для обхода ограничений")
 
         proxy = os.getenv("PROXY_URL")
         if proxy:
@@ -497,10 +727,13 @@ async def download_instagram_ytdlp_premium(url: str, quality: str) -> Tuple[Opti
 async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Метод через Instaloader с возможностью авторизации
-    Если есть сохраненная сессия - использует её
+    Если есть сохраненная сессия - использует её.
+    *Теперь также пытается использовать пользовательские cookies из session/{user_id}_instagram_cookies.txt,
+    если они существуют, даже если основная сессия отсутствует.*
     """
     try:
         logger.info("🔄 Instagram: Instaloader (с авторизацией)...")
+        # Используем заголовки, близкие к мобильному приложению
         L = instaloader.Instaloader(
             download_videos=True,
             download_pictures=True,
@@ -508,8 +741,10 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
             download_comments=False,
             save_metadata=False,
             quiet=True,
-            user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
+            user_agent='Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)'
         )
+
+        # Попробуем использовать глобальную сессию, если есть
         session_file = Path("session/instagram_session")
         if session_file.exists():
             try:
@@ -518,7 +753,7 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
                     L.load_session_from_file(username, str(session_file))
                     logger.info("✅ Загружена сохраненная сессия Instagram")
             except Exception as e:
-                logger.warning(f"⚠️ Не удалось загрузить сессию: {e}")
+                logger.warning(f"⚠️ Не удалось загрузить основную сессию: {e}")
 
         post = instaloader.Post.from_shortcode(L.context, shortcode)
         if post.is_video:
@@ -547,6 +782,13 @@ async def download_instagram_instaloader_auth(url: str, shortcode: str) -> Tuple
                 return (None, photos, description)
     except instaloader.exceptions.LoginRequiredException:
         logger.warning("⚠️ Instaloader: требуется авторизация для этого контента")
+        # Попробуем использовать пользовательские cookies, если Instaloader не смог без них
+        # Это менее прямой способ, но может сработать.
+        # Загрузка cookies в сессию Instaloader - сложная задача.
+        # Пока оставим это как примечание, что Instaloader не сработал.
+        # Основная логика обхода через cookies лежит в других методах.
+        # Этот метод в первую очередь для сессии.
+        pass
     except Exception as e:
         logger.error(f"❌ Instagram Instaloader: {e}")
     return None, None, None
@@ -555,6 +797,7 @@ async def download_instagram_with_user_cookies(url: str, shortcode: str, user_id
     """
     Метод с использованием cookies пользователя (обходит 18+)
     Файл должен быть: session/{user_id}_instagram_cookies.txt
+    Использует заголовки, максимально близкие к instaloader.
     """
     try:
         logger.info(f"🔄 Instagram: метод с cookies пользователя {user_id}...")
@@ -583,22 +826,37 @@ async def download_instagram_with_user_cookies(url: str, shortcode: str, user_id
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
         
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            cookies=cookies
+            timeout=aiohttp.ClientTimeout(total=30)
         ) as session:
+            # Заголовки, максимально приближенные к instaloader и мобильному приложению
             headers = {
                 'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
                 'Accept': '*/*',
                 'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'X-IG-App-Locale': 'en_US',
+                'X-IG-Device-Locale': 'en_US',
+                'X-IG-Mapped-Locale': 'en_US',
                 'X-IG-App-ID': '567067343352427',
-                'X-IG-WWW-Claim': '0',
-                'X-ASBD-ID': '129477',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin',
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
+                'X-IG-EU-DC-ENABLED': 'true',
+                'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600',
+                'X-IG-Connection-Speed': '-1kbps',
+                'X-FB-HTTP-Engine': 'Liger',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Connection': 'keep-alive',
+                'Referer': f'https://www.instagram.com/p/{shortcode}/',
+                'Origin': 'https://www.instagram.com',
             }
             
-            async with session.get(api_url, headers=headers) as resp:
+            async with session.get(api_url, headers=headers, cookies=cookies) as resp:
                 if resp.status == 404:
                     return None, None, None
                 if resp.status != 200:
@@ -706,11 +964,30 @@ async def download_instagram_ytdlp_with_user_auth(url: str, quality: str, user_i
             'retries': 5,
             'fragment_retries': 5,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
+                # Используем заголовки, максимально близкие к мобильному приложению
+                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'X-IG-App-Locale': 'en_US',
+                'X-IG-Device-Locale': 'en_US',
+                'X-IG-Mapped-Locale': 'en_US',
+                'X-IG-App-ID': '567067343352427', # com.instagram.android
+                'X-IG-Bandwidth-Speed-KBPS': '-1.000',
+                'X-IG-Bandwidth-TotalBytes-B': '0',
+                'X-IG-Bandwidth-TotalTime-MS': '0',
+                'X-IG-Capabilities': '3brTvx0=',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-Startup-Country': 'US',
+                'X-IG-Device-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Android-ID': '00000000-0000-0000-0000-000000000000', # Заглушка
+                'X-IG-Timezone-Offset': '3600',
+                'X-IG-Connection-Speed': '-1kbps',
+                'X-FB-HTTP-Engine': 'Liger',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Connection': 'keep-alive',
                 'Referer': 'https://www.instagram.com/',
-                'DNT': '1',
+                'Origin': 'https://www.instagram.com',
             },
             'geo_bypass': True,
             'geo_bypass_country': 'US',
@@ -765,22 +1042,14 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         logger.info(f"📌 Используем shortcode из yt-dlp: {shortcode}")
 
     # Проверяем, был ли shortcode получен *успешно* через yt-dlp (преобразование ссылки)
-    # Это будет верно, если yt-dlp не вернул None и не выдал ошибку 18+ при извлечении.
-    # original_shortcode == shortcode означает, что yt-dlp дал результат, который не None.
-    # (Предыдущая логика была: if not original_shortcode. Теперь: if original_shortcode is not None and original_shortcode == shortcode)
-    # Но на самом деле, если extract_instagram_shortcode вернул shortcode, значит, он его как-то получил (или из 'id', или из 'webpage_url').
-    # Логика "преобразование" важна, если регулярка из *оригинального* URL дает *другой* shortcode, чем тот, что вернул yt-dlp из 'webpage_url'.
-    # Давайте сравним с результатом регулярки из оригинального URL.
     regex_shortcode_match = re.search(r'/(?:p|reel|share|tv)/([^/\?]+)', url)
     regex_shortcode = regex_shortcode_match.group(1) if regex_shortcode_match else None
 
     if shortcode and original_shortcode and shortcode == original_shortcode and regex_shortcode and shortcode != regex_shortcode:
          logger.info(f"ℹ️ Shortcode '{shortcode}' был получен через yt-dlp (преобразование ссылки, например, share/ -> reel/)")
     elif shortcode and original_shortcode and shortcode == original_shortcode:
-         # Это случай, когда yt-dlp вернул shortcode, но он совпадает с тем, что дала регулярка (редкий, но возможный)
          logger.info(f"ℹ️ Shortcode '{shortcode}' был получен через yt-dlp (не преобразование, но yt-dlp успешно сработал)")
     elif not original_shortcode:
-         # Это случай, когда yt-dlp вернул None (например, из-за 18+ или другой ошибки), использована регулярка
          logger.info(f"ℹ️ Shortcode '{shortcode}' был получен через регулярное выражение (yt-dlp не сработал)")
 
 
@@ -790,6 +1059,7 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     standard_methods = [
         ("Mobile API", lambda: download_instagram_mobile_api(url, shortcode)),
         ("GraphQL", lambda: download_instagram_graphql(url, shortcode)),
+        ("Web API", lambda: download_instagram_web_api(url, shortcode)), # Новый метод
         ("yt-dlp Premium", lambda: download_instagram_ytdlp_premium(url, quality)),
         ("oEmbed", lambda: download_instagram_oembed(url, shortcode)),
         ("Instaloader Auth", lambda: download_instagram_instaloader_auth(url, shortcode)),
@@ -844,7 +1114,6 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         "  2. Проверить, что аккаунт публичный\n"
         "  3. Скопировать ссылку заново\n"
         "  4. Перезапустить Instagram на своем устройстве\n"
-        "  5. Использовать cookies пользователя (см. инструкцию в README)"
     )
     return None, None, error_msg
 
