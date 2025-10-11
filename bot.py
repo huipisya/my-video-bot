@@ -242,7 +242,6 @@ def load_cookies_from_file(cookies_file: Path) -> Dict[str, str]:
         logger.error(f"Ошибка чтения cookies: {e}")
     return cookies
 
-
 # === 📸 INSTAGRAM РАЗДЕЛ ===
 
 async def extract_instagram_shortcode(url: str) -> Optional[Tuple[str, bool]]:
@@ -637,6 +636,7 @@ async def send_instagram_content(chat_id: int, video_path: Optional[str], photos
         return False
     
     return False
+
 
 # === 📤 TIKTOK ФОТОчка ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
