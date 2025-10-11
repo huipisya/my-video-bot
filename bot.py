@@ -127,22 +127,27 @@ def set_quality_setting(user_id: int, quality: str):
 
 def get_ydl_opts(quality: str = "best") -> dict:
     opts = {
-        'format': 'best[ext=mp4]/best',  # Упрощённый формат
+        'format': 'best[ext=mp4]/best',
         'noplaylist': True,
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android']  # Используем Android клиент
+                'player_client': ['android', 'ios', 'mweb'],
+                'player_skip': ['configs', 'webpage'],
+                'skip': ['dash', 'hls']
             }
+        },
+        'http_headers': {
+            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+            'Accept-Language': 'en-US,en;q=0.9',
         },
     }
     proxy = os.getenv("PROXY_URL")
     if proxy:
         opts['proxy'] = proxy
     return opts
-
 def is_valid_url(url: str) -> bool:
     regex = re.compile(
         r'^(https?://)?(www\.)?'
