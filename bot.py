@@ -245,69 +245,34 @@ def load_cookies_from_file(cookies_file: Path) -> Dict[str, str]:
 
 # === 📸 INSTAGRAM РАЗДЕЛ ===
 
-async def extract_instagram_shortcode(url: str) -> Optional[str]:
-    """Извлекает shortcode из URL Instagram"""
+async def extract_instagram_shortcode(url: str) -> Optional[Tuple[str, bool]]:
+    """
+    Извлекает shortcode из URL Instagram
+    Returns: (shortcode, is_reel)
+    """
+    # Проверяем тип контента по URL
+    url_lower = url.lower()
+    is_reel = '/reel/' in url_lower or '/reels/' in url_lower
+    
     match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
     if match:
         shortcode = match.group(1)
-        logger.debug(f"Извлечён shortcode: {shortcode}")
-        return shortcode
+        logger.debug(f"Извлечён shortcode: {shortcode} ({'reel' if is_reel else 'post'})")
+        return (shortcode, is_reel)
     
     if '/share/' in url:
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.get(url, allow_redirects=True) as resp:
                     final_url = str(resp.url)
+                    final_url_lower = final_url.lower()
+                    is_reel = '/reel/' in final_url_lower or '/reels/' in final_url_lower
+                    
                     match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', final_url)
                     if match:
                         shortcode = match.group(1)
-                        logger.debug(f"Извлечён shortcode из /share/: {shortcode}")
-                        return shortcode
-        except Exception as e:
-            logger.warning(f"Не удалось резолвить /share/: {e}")
-    
-    return None
-
-
-def load_cookies_from_file(cookies_file: Path) -> Dict[str, str]:
-    """Загружает cookies из файла"""
-    cookies = {}
-    try:
-        with open(cookies_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('#') or not line.strip():
-                    continue
-                try:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 7:
-                        cookies[parts[5]] = parts[6]
-                except:
-                    continue
-        logger.debug(f"Загружено {len(cookies)} cookies из {cookies_file.name}")
-    except Exception as e:
-        logger.error(f"Ошибка чтения cookies: {e}")
-    return cookies
-
-# === 📸 INSTAGRAM РАЗДЕЛ ===
-
-async def extract_instagram_shortcode(url: str) -> Optional[str]:
-    """Извлекает shortcode из URL Instagram"""
-    match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
-    if match:
-        shortcode = match.group(1)
-        logger.debug(f"Извлечён shortcode: {shortcode}")
-        return shortcode
-    
-    if '/share/' in url:
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.get(url, allow_redirects=True) as resp:
-                    final_url = str(resp.url)
-                    match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', final_url)
-                    if match:
-                        shortcode = match.group(1)
-                        logger.debug(f"Извлечён shortcode из /share/: {shortcode}")
-                        return shortcode
+                        logger.debug(f"Извлечён shortcode из /share/: {shortcode} ({'reel' if is_reel else 'post'})")
+                        return (shortcode, is_reel)
         except Exception as e:
             logger.warning(f"Не удалось резолвить /share/: {e}")
     
@@ -514,26 +479,28 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     3. yt-dlp С cookies (для приватного контента)
     4. Mobile API С cookies (резерв)
     """
-    shortcode = await extract_instagram_shortcode(url)
-    if not shortcode:
+    result = await extract_instagram_shortcode(url)
+    if not result:
         return None, None, "❌ Некорректная ссылка на Instagram"
     
-    # Определяем тип контента (reels/posts)
-    is_reel = '/reel/' in url.lower() or '/reels/' in url.lower()
-    
+    shortcode, is_reel = result
     logger.info(f"📌 Instagram: {shortcode} ({'reel' if is_reel else 'post'})")
     
     # ШАГ 1: YT-DLP БЕЗ COOKIES
     logger.info("🔄 Попытка 1: yt-dlp без авторизации...")
     video_path, photos, description = await download_instagram_ytdlp(url)
     if video_path or photos:
-        return (video_path, photos, description)
+        # Убираем описание для reels
+        final_description = None if is_reel else description
+        return (video_path, photos, final_description)
     
     # ШАГ 2: MOBILE API БЕЗ COOKIES
     logger.info("🔄 Попытка 2: Mobile API без авторизации...")
     video_path, photos, description, error_code = await download_instagram_mobile_api(shortcode)
     if video_path or photos:
-        return (video_path, photos, description)
+        # Убираем описание для reels
+        final_description = None if is_reel else description
+        return (video_path, photos, final_description)
     
     if error_code == '404':
         return None, None, "❌ Контент не найден или удалён"
@@ -562,14 +529,18 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         # yt-dlp с cookies
         video_path, photos, description = await download_instagram_ytdlp(url, cookies_file)
         if video_path or photos:
-            return (video_path, photos, description)
+            # Убираем описание для reels
+            final_description = None if is_reel else description
+            return (video_path, photos, final_description)
         
         # Mobile API с cookies
         cookies_dict = load_cookies_from_file(cookies_file)
         if cookies_dict:
             video_path, photos, description, _ = await download_instagram_mobile_api(shortcode, cookies_dict)
             if video_path or photos:
-                return (video_path, photos, description)
+                # Убираем описание для reels
+                final_description = None if is_reel else description
+                return (video_path, photos, final_description)
     
     return None, None, (
         "❌ Не удалось скачать контент\n\n"
@@ -667,7 +638,7 @@ async def send_instagram_content(chat_id: int, video_path: Optional[str], photos
     
     return False
 
-# === 📤 TIKTOK ФОТО ===
+# === 📤 TIKTOK ФОТОчка ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     try:
         clean_url = url.split('?')[0]
