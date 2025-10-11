@@ -21,8 +21,13 @@ from dotenv import load_dotenv
 import yt_dlp
 import instaloader
 import sys
+import base64
+from datetime import datetime
 sys.stdout.reconfigure(encoding='utf-8')
+
+# Глобальная переменная для Device ID
 IG_DEVICE_ID = str(uuid.uuid4())
+
 # === 🧰 ЛОГИРОВАНИЕ ===
 logging.basicConfig(
     level=logging.INFO,
@@ -30,12 +35,125 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# === 🔐 ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ (ВАЖНО: ДО ВСЕГО!) ===
+load_dotenv()
+
+# === 📁 СОЗДАНИЕ COOKIES ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+def init_cookies_from_env():
+    """Создаёт файлы cookies из переменных окружения Railway"""
+    cookies_created = 0
+    
+    # Проверяем cookies.txt (глобальные)
+    cookies_txt_content = os.getenv("COOKIES_TXT")
+    if cookies_txt_content:
+        cookies_file = Path("cookies.txt")
+        with open(cookies_file, 'w', encoding='utf-8') as f:
+            f.write(cookies_txt_content)
+        logger.info(f"✅ Создан cookies.txt из переменной окружения")
+        cookies_created += 1
+    
+    # Проверяем cookies_bot1/2/3
+    for i in range(1, 4):
+        env_var = f"COOKIES_BOT{i}"
+        cookies_content = os.getenv(env_var)
+        if cookies_content:
+            cookies_file = Path(f"cookies_bot{i}")
+            with open(cookies_file, 'w', encoding='utf-8') as f:
+                f.write(cookies_content)
+            logger.info(f"✅ Создан cookies_bot{i} из переменной окружения")
+            cookies_created += 1
+    
+    if cookies_created == 0:
+        logger.warning("⚠️ Не найдено cookies в переменных окружения")
+    else:
+        logger.info(f"✅ Создано {cookies_created} файлов cookies")
+
+# Инициализируем cookies из переменных окружения
+init_cookies_from_env()
+
+# === 🔄 РОТАЦИЯ АККАУНТОВ INSTAGRAM ===
+class BotAccount:
+    def __init__(self, name: str, cookies_file: Path):
+        self.name = name
+        self.cookies_file = cookies_file
+        self.device_id = str(uuid.uuid4())
+        self.is_busy = False
+        self.last_used = 0
+        self.success_count = 0
+        self.fail_count = 0
+    
+    def can_use(self) -> bool:
+        """Проверяет, можно ли использовать аккаунт (не занят + прошло 5 сек)"""
+        if self.is_busy:
+            return False
+        time_since_last = time.time() - self.last_used
+        return time_since_last >= 5
+
+class AccountRotator:
+    def __init__(self):
+        self.accounts: List[BotAccount] = []
+        self._load_accounts()
+        self.current_index = 0
+    
+    def _load_accounts(self):
+        """Загружает доступные аккаунты из cookies_bot1/2/3"""
+        for i in range(1, 4):
+            cookies_file = Path(f"cookies_bot{i}")
+            if cookies_file.exists():
+                account = BotAccount(f"BOT_{i}", cookies_file)
+                self.accounts.append(account)
+                logger.info(f"✅ Загружен аккаунт: {account.name}")
+        
+        if not self.accounts:
+            logger.warning("⚠️ Нет аккаунтов для ротации")
+    
+    def get_next_account(self) -> Optional[BotAccount]:
+        """Возвращает следующий доступный аккаунт"""
+        if not self.accounts:
+            return None
+        
+        # Пробуем найти свободный аккаунт (3 попытки)
+        for _ in range(len(self.accounts)):
+            account = self.accounts[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.accounts)
+            
+            if account.can_use():
+                account.is_busy = True
+                account.last_used = time.time()
+                logger.info(f"🔄 Выбран {account.name} (успехов: {account.success_count}, ошибок: {account.fail_count})")
+                return account
+        
+        return None
+    
+    def release_account(self, account: BotAccount, success: bool):
+        """Освобождает аккаунт после использования"""
+        account.is_busy = False
+        if success:
+            account.success_count += 1
+        else:
+            account.fail_count += 1
+    
+    def get_stats(self) -> str:
+        """Возвращает статистику по аккаунтам"""
+        if not self.accounts:
+            return "📊 Нет аккаунтов"
+        
+        stats = "📊 Статистика аккаунтов:\n"
+        for acc in self.accounts:
+            stats += f"• {acc.name}: ✅{acc.success_count} ❌{acc.fail_count}\n"
+        return stats
+
+# Глобальный ротатор (инициализируется ПОСЛЕ создания cookies!)
+account_rotator = AccountRotator()
+
 # === 🔐 ТОКЕН И WEBHOOK ===
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не найден в переменных окружения")
+
+# ... остальной код без изменений
 
 WEBHOOK_PATH = "/"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
@@ -146,22 +264,16 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
 
 # === 📥 ОПТИМИЗИРОВАННОЕ СКАЧИВАНИЕ С INSTAGRAM ===
 
-# Глобальная переменная для Device ID (стабильный между запросами)
-IG_DEVICE_ID = str(uuid.uuid4())
-
 async def extract_instagram_shortcode(url: str) -> Optional[str]:
-    """
-    Извлекает shortcode из URL Instagram
-    Поддерживает все форматы: /p/, /reel/, /reels/, /tv/, /share/
-    """
-    # Сначала пробуем стандартные форматы
+    """Извлекает shortcode из URL Instagram (поддерживает /p/, /reel/, /share/)"""
+    # Стандартные форматы
     match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
     if match:
         shortcode = match.group(1)
         logger.info(f"📌 Извлечён shortcode: {shortcode}")
         return shortcode
     
-    # Для /share/ пробуем резолвить напрямую через HTTP редирект
+    # Формат /share/ - резолвим через редирект
     if '/share/' in url:
         logger.info("🔄 Обнаружен /share/ формат, резолвим...")
         try:
@@ -180,88 +292,33 @@ async def extract_instagram_shortcode(url: str) -> Optional[str]:
     return None
 
 
-async def download_instagram_ytdlp_premium(url: str, quality: str, cookies_file: Optional[Path] = None) -> Optional[str]:
-    """
-    Метод через yt-dlp с расширенными настройками
-    Работает лучше всего с cookies для обхода rate-limit
-    """
+def load_cookies_from_file(cookies_file: Path) -> dict:
+    """Загружает cookies из файла в формате Netscape"""
+    cookies = {}
     try:
-        logger.info("🔄 Instagram: yt-dlp (расширенный)...")
-        
-        ydl_opts = {
-            'format': 'best',
-            'merge_output_format': 'mp4',
-            'noplaylist': True,
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
-            'socket_timeout': 30,
-            'retries': 3,
-            'fragment_retries': 3,
-            'http_headers': {
-                'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
-                'Accept': '*/*',
-                'Accept-Language': 'en-US',
-                'Accept-Encoding': 'gzip, deflate',
-                'X-IG-App-Locale': 'en_US',
-                'X-IG-Device-Locale': 'en_US',
-                'X-IG-Mapped-Locale': 'en_US',
-                'X-IG-App-ID': '567067343352427',
-                'X-IG-Device-ID': IG_DEVICE_ID,
-                'X-IG-Android-ID': IG_DEVICE_ID,
-                'Origin': 'https://www.instagram.com',
-                'Referer': 'https://www.instagram.com/',
-            },
-            'geo_bypass': True,
-            'geo_bypass_country': 'US',
-            'age_limit': None,
-        }
-        
-        # Добавляем cookies если есть
-        if cookies_file and cookies_file.exists():
-            ydl_opts['cookiefile'] = str(cookies_file)
-            logger.info(f"✅ Используются cookies: {cookies_file.name}")
-        
-        # Добавляем прокси если есть
-        proxy = os.getenv("PROXY_URL")
-        if proxy:
-            ydl_opts['proxy'] = proxy
-            logger.debug(f"✅ Используется прокси")
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            
-            if temp_file and os.path.exists(temp_file):
-                file_size = os.path.getsize(temp_file) / (1024 * 1024)
-                logger.info(f"✅ Видео скачано через yt-dlp ({file_size:.1f} МБ)")
-                return temp_file
-                
-    except yt_dlp.utils.DownloadError as e:
-        error_str = str(e).lower()
-        
-        # Обработка специфичных ошибок
-        if 'inappropriate' in error_str or 'unavailable for certain audiences' in error_str:
-            logger.warning("⚠️ yt-dlp: контент 18+ (inappropriate content)")
-        elif 'login required' in error_str:
-            logger.warning("⚠️ yt-dlp: требуется авторизация")
-        elif '429' in error_str or 'too many requests' in error_str:
-            logger.warning("⚠️ yt-dlp: rate-limit (429)")
-        else:
-            logger.error(f"❌ yt-dlp error: {e}")
+        with open(cookies_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip():
+                    continue
+                try:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 7:
+                        cookies[parts[5]] = parts[6]
+                except:
+                    continue
+        logger.debug(f"✅ Загружено {len(cookies)} cookies из {cookies_file.name}")
     except Exception as e:
-        logger.error(f"❌ yt-dlp exception: {e}")
-    
-    return None
+        logger.error(f"❌ Ошибка чтения cookies: {e}")
+    return cookies
 
 
-async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[dict] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[dict] = None, account_name: str = "public") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
-    Метод через мобильное API Instagram с полными заголовками
-    Работает для публичного контента и с cookies для 18+
+    Скачивание через мобильное API Instagram
+    Поддерживает: видео, фото, карусели
     """
     try:
-        logger.info("🔄 Instagram: Mobile API...")
+        logger.info(f"🔄 Instagram Mobile API ({account_name})...")
         
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
         
@@ -269,24 +326,8 @@ async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[d
             'User-Agent': 'Instagram 269.0.0.18.75 Android (30/11; 420dpi; 1080x2265; OnePlus; ONEPLUS A6000; OnePlus6; qcom; en_US; 314665256)',
             'Accept': '*/*',
             'Accept-Language': 'en-US',
-            'Accept-Encoding': 'gzip, deflate',
-            'X-IG-App-Locale': 'en_US',
-            'X-IG-Device-Locale': 'en_US',
-            'X-IG-Mapped-Locale': 'en_US',
             'X-IG-App-ID': '567067343352427',
-            'X-IG-Bandwidth-Speed-KBPS': '-1.000',
-            'X-IG-Bandwidth-TotalBytes-B': '0',
-            'X-IG-Bandwidth-TotalTime-MS': '0',
-            'X-IG-Capabilities': '3brTvx0=',
-            'X-IG-Connection-Type': 'WIFI',
-            'X-IG-App-Startup-Country': 'US',
-            'X-IG-Device-ID': IG_DEVICE_ID,
-            'X-IG-Android-ID': IG_DEVICE_ID,
-            'X-IG-Timezone-Offset': '3600',
-            'X-IG-Connection-Speed': '-1kbps',
-            'X-FB-HTTP-Engine': 'Liger',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Connection': 'keep-alive',
+            'X-IG-Device-ID': str(uuid.uuid4()),
             'Referer': f'https://www.instagram.com/p/{shortcode}/',
             'Origin': 'https://www.instagram.com',
         }
@@ -294,28 +335,30 @@ async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[d
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
             async with session.get(api_url, headers=headers, cookies=cookies_dict or {}) as resp:
                 if resp.status == 404:
-                    logger.warning("Mobile API: контент не найден (404)")
+                    logger.warning(f"Mobile API ({account_name}): контент не найден (404)")
                     return None, None, None
                     
                 if resp.status == 403:
-                    logger.warning("Mobile API: доступ запрещен (403) - возможно 18+ или приватный")
+                    logger.warning(f"Mobile API ({account_name}): доступ запрещен (403)")
                     return None, None, None
                 
                 if resp.status == 429:
-                    logger.warning("Mobile API: rate-limit (429)")
+                    logger.warning(f"Mobile API ({account_name}): rate-limit (429)")
                     return None, None, None
                     
                 if resp.status != 200:
-                    logger.warning(f"Mobile API: статус {resp.status}")
+                    logger.warning(f"Mobile API ({account_name}): статус {resp.status}")
                     return None, None, None
                 
                 try:
                     data = await resp.json()
                 except:
+                    logger.warning(f"Mobile API ({account_name}): ошибка парсинга JSON")
                     return None, None, None
                 
                 items = data.get('items', [])
                 if not items:
+                    logger.warning(f"Mobile API ({account_name}): нет items")
                     return None, None, None
                 
                 media = items[0]
@@ -329,7 +372,7 @@ async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[d
                         if video_url:
                             video_path = os.path.join(tempfile.gettempdir(), f"ig_{shortcode}.mp4")
                             if await download_file(video_url, video_path, timeout=30):
-                                logger.info("✅ Видео скачано (Mobile API)")
+                                logger.info(f"✅ Видео скачано (Mobile API - {account_name})")
                                 return (video_path, None, None)
                 
                 # Карусель (type 8)
@@ -341,14 +384,12 @@ async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[d
                     for idx, item in enumerate(carousel_media[:10]):
                         item_type = item.get('media_type', 0)
                         
-                        if item_type == 2:  # Видео в карусели
+                        if item_type == 2:  # Видео
                             video_versions = item.get('video_versions', [])
                             if video_versions:
-                                video_url = video_versions[0].get('url')
-                                if video_url:
-                                    videos.append(video_url)
+                                videos.append(video_versions[0].get('url'))
                                     
-                        elif item_type == 1:  # Фото в карусели
+                        elif item_type == 1:  # Фото
                             img_candidates = item.get('image_versions2', {}).get('candidates', [])
                             if img_candidates:
                                 img_url = img_candidates[0].get('url')
@@ -361,13 +402,13 @@ async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[d
                     if videos:
                         video_path = os.path.join(tempfile.gettempdir(), f"ig_{shortcode}.mp4")
                         if await download_file(videos[0], video_path, timeout=30):
-                            logger.info("✅ Видео из карусели (Mobile API)")
+                            logger.info(f"✅ Видео из карусели (Mobile API - {account_name})")
                             return (video_path, None, None)
                     
                     if photos:
                         caption = media.get('caption', {})
                         description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
-                        logger.info(f"✅ {len(photos)} фото из карусели (Mobile API)")
+                        logger.info(f"✅ {len(photos)} фото из карусели (Mobile API - {account_name})")
                         return (None, photos, description)
                 
                 # Фото (type 1)
@@ -380,23 +421,76 @@ async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[d
                             if await download_file(img_url, photo_path, timeout=15):
                                 caption = media.get('caption', {})
                                 description = caption.get('text', "📸 Instagram") if caption else "📸 Instagram"
-                                logger.info("✅ Фото скачано (Mobile API)")
+                                logger.info(f"✅ Фото скачано (Mobile API - {account_name})")
                                 return (None, [photo_path], description)
                                 
     except asyncio.TimeoutError:
-        logger.warning("⏱️ Mobile API timeout")
+        logger.warning(f"⏱️ Mobile API ({account_name}): timeout")
     except Exception as e:
-        logger.error(f"❌ Mobile API error: {e}")
+        logger.error(f"❌ Mobile API ({account_name}) error: {e}")
     
     return None, None, None
 
 
-async def download_instagram_graphql(shortcode: str, cookies_dict: Optional[dict] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+async def download_instagram_ytdlp(url: str, quality: str, cookies_file: Optional[Path] = None, account_name: str = "public") -> Optional[str]:
     """
-    Метод через Instagram GraphQL API (запасной вариант)
+    Скачивание через yt-dlp (универсальный метод)
     """
     try:
-        logger.info("🔄 Instagram: GraphQL API...")
+        logger.info(f"🔄 Instagram yt-dlp ({account_name})...")
+        
+        ydl_opts = {
+            'format': 'best',
+            'merge_output_format': 'mp4',
+            'noplaylist': True,
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 30,
+            'retries': 2,
+            'http_headers': {
+                'User-Agent': 'Instagram 269.0.0.18.75 Android',
+                'Accept': '*/*',
+                'X-IG-App-ID': '567067343352427',
+            },
+        }
+        
+        if cookies_file and cookies_file.exists():
+            ydl_opts['cookiefile'] = str(cookies_file)
+        
+        proxy = os.getenv("PROXY_URL")
+        if proxy:
+            ydl_opts['proxy'] = proxy
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            temp_file = ydl.prepare_filename(info)
+            
+            if temp_file and os.path.exists(temp_file):
+                file_size = os.path.getsize(temp_file) / (1024 * 1024)
+                logger.info(f"✅ Видео скачано через yt-dlp ({account_name}) - {file_size:.1f} МБ")
+                return temp_file
+                
+    except yt_dlp.utils.DownloadError as e:
+        error_str = str(e).lower()
+        if 'inappropriate' in error_str or 'login required' in error_str:
+            logger.warning(f"⚠️ yt-dlp ({account_name}): требуется авторизация")
+        elif '429' in error_str:
+            logger.warning(f"⚠️ yt-dlp ({account_name}): rate-limit")
+        else:
+            logger.error(f"❌ yt-dlp ({account_name}): {e}")
+    except Exception as e:
+        logger.error(f"❌ yt-dlp ({account_name}) exception: {e}")
+    
+    return None
+
+
+async def download_instagram_graphql(shortcode: str, cookies_dict: Optional[dict] = None, account_name: str = "public") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """
+    Скачивание через GraphQL API (запасной метод)
+    """
+    try:
+        logger.info(f"🔄 Instagram GraphQL ({account_name})...")
         
         query_hash = "2b0673e0dc4580674a88d426fe00ea90"
         variables = json.dumps({"shortcode": shortcode})
@@ -405,17 +499,14 @@ async def download_instagram_graphql(shortcode: str, cookies_dict: Optional[dict
         headers = {
             'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15',
             'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
             'X-IG-App-ID': '567067343352427',
-            'X-Requested-With': 'XMLHttpRequest',
             'Referer': f'https://www.instagram.com/p/{shortcode}/',
-            'Origin': 'https://www.instagram.com',
         }
         
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
             async with session.get(graphql_url, headers=headers, cookies=cookies_dict or {}) as resp:
                 if resp.status != 200:
-                    logger.warning(f"GraphQL: статус {resp.status}")
+                    logger.warning(f"GraphQL ({account_name}): статус {resp.status}")
                     return None, None, None
                 
                 try:
@@ -434,163 +525,188 @@ async def download_instagram_graphql(shortcode: str, cookies_dict: Optional[dict
                     if video_url:
                         video_path = os.path.join(tempfile.gettempdir(), f"ig_gql_{shortcode}.mp4")
                         if await download_file(video_url, video_path, timeout=30):
-                            logger.info("✅ Видео скачано (GraphQL)")
+                            logger.info(f"✅ Видео скачано (GraphQL - {account_name})")
                             return (video_path, None, None)
                 else:
                     img_url = media.get('display_url')
                     if img_url:
                         photo_path = os.path.join(tempfile.gettempdir(), f"ig_gql_{shortcode}.jpg")
                         if await download_file(img_url, photo_path, timeout=15):
-                            caption_edge = media.get('edge_media_to_caption', {}).get('edges', [])
-                            description = caption_edge[0]['node']['text'] if caption_edge else "📸 Instagram"
-                            logger.info("✅ Фото скачано (GraphQL)")
-                            return (None, [photo_path], description)
+                            logger.info(f"✅ Фото скачано (GraphQL - {account_name})")
+                            return (None, [photo_path], "📸 Instagram")
                             
     except Exception as e:
-        logger.error(f"❌ GraphQL error: {e}")
+        logger.error(f"❌ GraphQL ({account_name}) error: {e}")
     
     return None, None, None
-
-
-def load_cookies_from_file(cookies_file: Path) -> dict:
-    """Загружает cookies из файла в формате Netscape"""
-    cookies = {}
-    try:
-        with open(cookies_file, 'r') as f:
-            for line in f:
-                if line.startswith('#') or not line.strip():
-                    continue
-                try:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 7:
-                        cookies[parts[5]] = parts[6]
-                except:
-                    continue
-        logger.debug(f"✅ Загружено {len(cookies)} cookies из {cookies_file.name}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка чтения cookies: {e}")
-    return cookies
 
 
 async def download_instagram(url: str, quality: str = "best", user_id: Optional[int] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Главная функция скачивания Instagram контента
     
-    Стратегия (оптимизирована под rate-limit):
-    1. Mobile API с cookies (быстрый, обходит rate-limit)
-    2. yt-dlp с cookies (надёжный)
-    3. GraphQL API с cookies (запасной)
-    4. Mobile API без cookies (для публичного)
-    5. yt-dlp без cookies (последняя попытка)
-    
-    Args:
-        url: Ссылка на Instagram (включая /share/)
-        quality: Качество видео
-        user_id: ID пользователя для персональных cookies
+    СТРАТЕГИЯ:
+    1. Если есть cookies.txt → пробуем все методы с ним
+    2. Если не получилось → ротация BOT аккаунтов (cookies_bot1/2/3)
+    3. Если не получилось → публичные методы без cookies
     
     Returns:
         (video_path, photos_list, description) или (None, None, error_message)
     """
     
-    # Извлекаем shortcode (поддерживает /share/ через HTTP редирект)
+    # Извлекаем shortcode
     shortcode = await extract_instagram_shortcode(url)
     if not shortcode:
         return None, None, "❌ Некорректная ссылка на Instagram. Отправьте ссылку вида:\n• instagram.com/p/...\n• instagram.com/reel/...\n• instagram.com/share/..."
     
     logger.info(f"📌 Instagram shortcode: {shortcode}")
+    logger.info("=" * 60)
+    logger.info("🔄 НАЧАЛО ЦЕПОЧКИ МЕТОДОВ")
+    logger.info("=" * 60)
     
-    # Проверяем наличие cookies
+    # === БЛОК 1: COOKIES.TXT (глобальные cookies) ===
     global_cookies = Path("cookies.txt")
-    user_cookies = Path(f"session/{user_id}_instagram_cookies.txt") if user_id else None
-    
-    has_global_cookies = global_cookies.exists()
-    has_user_cookies = user_cookies and user_cookies.exists()
-    
-    # Загружаем cookies заранее
-    cookies_dict = None
-    cookies_file = None
-    
-    if has_user_cookies:
-        cookies_dict = load_cookies_from_file(user_cookies)
-        cookies_file = user_cookies
-        logger.info(f"✅ Используются cookies пользователя {user_id}")
-    elif has_global_cookies:
+    if global_cookies.exists():
+        logger.info("📦 БЛОК 1: COOKIES.TXT")
         cookies_dict = load_cookies_from_file(global_cookies)
-        cookies_file = global_cookies
-        logger.info("✅ Используются глобальные cookies")
-    else:
-        logger.info("ℹ️ Cookies отсутствуют, будут только публичные методы")
-    
-    # === СТРАТЕГИЯ С COOKIES (если есть) ===
-    if cookies_dict or cookies_file:
-        # МЕТОД 1: Mobile API с cookies (лучше всего обходит rate-limit)
-        logger.info("🔄 Попытка 1/5: Mobile API с cookies")
-        video_path, photos, description = await download_instagram_mobile_api(shortcode, cookies_dict)
+        
+        # 1. Mobile API + cookies.txt
+        logger.info("🔄 1/8: Mobile API + cookies.txt")
+        video_path, photos, description = await download_instagram_mobile_api(shortcode, cookies_dict, "cookies.txt")
         if video_path or photos:
-            logger.info("✅ Успешно скачано (Mobile API с cookies)")
+            logger.info("✅ УСПЕХ! Mobile API + cookies.txt")
             return (video_path, photos, description)
         
-        # МЕТОД 2: yt-dlp с cookies
-        logger.info("🔄 Попытка 2/5: yt-dlp с cookies")
-        result = await download_instagram_ytdlp_premium(url, quality, cookies_file)
-        if result and os.path.exists(result):
-            logger.info("✅ Успешно скачано (yt-dlp с cookies)")
+        # 2. yt-dlp + cookies.txt
+        logger.info("🔄 2/8: yt-dlp + cookies.txt")
+        result = await download_instagram_ytdlp(url, quality, global_cookies, "cookies.txt")
+        if result:
+            logger.info("✅ УСПЕХ! yt-dlp + cookies.txt")
             return (result, None, None)
         
-        # МЕТОД 3: GraphQL с cookies
-        logger.info("🔄 Попытка 3/5: GraphQL API с cookies")
-        video_path, photos, description = await download_instagram_graphql(shortcode, cookies_dict)
+        # 3. GraphQL + cookies.txt
+        logger.info("🔄 3/8: GraphQL + cookies.txt")
+        video_path, photos, description = await download_instagram_graphql(shortcode, cookies_dict, "cookies.txt")
         if video_path or photos:
-            logger.info("✅ Успешно скачано (GraphQL с cookies)")
+            logger.info("✅ УСПЕХ! GraphQL + cookies.txt")
             return (video_path, photos, description)
+        
+        logger.info("⚠️ cookies.txt не сработал")
     
-    # === СТРАТЕГИЯ БЕЗ COOKIES (публичный контент) ===
-    # МЕТОД 4: Mobile API без cookies
-    logger.info("🔄 Попытка 4/5: Mobile API без cookies")
-    video_path, photos, description = await download_instagram_mobile_api(shortcode, None)
+    # === БЛОК 2: РОТАЦИЯ BOT АККАУНТОВ ===
+    if account_rotator.accounts:
+        logger.info("=" * 60)
+        logger.info("📦 БЛОК 2: РОТАЦИЯ BOT АККАУНТОВ")
+        logger.info("=" * 60)
+        
+        for attempt in range(len(account_rotator.accounts)):
+            account = account_rotator.get_next_account()
+            
+            if not account:
+                logger.info("⚠️ Все аккаунты заняты, пропускаем")
+                break
+            
+            try:
+                cookies_dict = load_cookies_from_file(account.cookies_file)
+                
+                # 4. Mobile API + BOT
+                logger.info(f"🔄 {4+attempt*3}/8: Mobile API + {account.name}")
+                video_path, photos, description = await download_instagram_mobile_api(shortcode, cookies_dict, account.name)
+                if video_path or photos:
+                    logger.info(f"✅ УСПЕХ! Mobile API + {account.name}")
+                    account_rotator.release_account(account, success=True)
+                    return (video_path, photos, description)
+                
+                # 5. yt-dlp + BOT
+                logger.info(f"🔄 {5+attempt*3}/8: yt-dlp + {account.name}")
+                result = await download_instagram_ytdlp(url, quality, account.cookies_file, account.name)
+                if result:
+                    logger.info(f"✅ УСПЕХ! yt-dlp + {account.name}")
+                    account_rotator.release_account(account, success=True)
+                    return (result, None, None)
+                
+                # 6. GraphQL + BOT
+                logger.info(f"🔄 {6+attempt*3}/8: GraphQL + {account.name}")
+                video_path, photos, description = await download_instagram_graphql(shortcode, cookies_dict, account.name)
+                if video_path or photos:
+                    logger.info(f"✅ УСПЕХ! GraphQL + {account.name}")
+                    account_rotator.release_account(account, success=True)
+                    return (video_path, photos, description)
+                
+                # Аккаунт не сработал
+                account_rotator.release_account(account, success=False)
+                logger.info(f"⚠️ {account.name} не сработал")
+                
+            except Exception as e:
+                logger.error(f"❌ {account.name} exception: {e}")
+                account_rotator.release_account(account, success=False)
+        
+        logger.info("⚠️ Все BOT аккаунты не сработали")
+    
+    # === БЛОК 3: ПУБЛИЧНЫЕ МЕТОДЫ (без cookies) ===
+    logger.info("=" * 60)
+    logger.info("📦 БЛОК 3: ПУБЛИЧНЫЕ МЕТОДЫ")
+    logger.info("=" * 60)
+    
+    # 7. Mobile API публичный
+    logger.info("🔄 7/8: Mobile API (публичный)")
+    video_path, photos, description = await download_instagram_mobile_api(shortcode, None, "public")
     if video_path or photos:
-        logger.info("✅ Успешно скачано (Mobile API публичный)")
+        logger.info("✅ УСПЕХ! Mobile API (публичный)")
         return (video_path, photos, description)
     
-    # МЕТОД 5: yt-dlp без cookies (последняя попытка)
-    logger.info("🔄 Попытка 5/5: yt-dlp без cookies")
-    result = await download_instagram_ytdlp_premium(url, quality, None)
-    if result and os.path.exists(result):
-        logger.info("✅ Успешно скачано (yt-dlp публичный)")
+    # 8. yt-dlp публичный
+    logger.info("🔄 8/8: yt-dlp (публичный)")
+    result = await download_instagram_ytdlp(url, quality, None, "public")
+    if result:
+        logger.info("✅ УСПЕХ! yt-dlp (публичный)")
         return (result, None, None)
     
     # === ВСЕ МЕТОДЫ НЕ СРАБОТАЛИ ===
-    logger.error("❌ Все методы не сработали")
+    logger.info("=" * 60)
+    logger.error("❌ ВСЕ МЕТОДЫ НЕ СРАБОТАЛИ")
+    logger.info("=" * 60)
     
-    # Формируем детальное сообщение об ошибке
-    if not has_global_cookies and not has_user_cookies:
+    if account_rotator.accounts:
+        logger.info(account_rotator.get_stats())
+    
+    # Формируем сообщение об ошибке
+    has_any_cookies = global_cookies.exists() or account_rotator.accounts
+    
+    if not has_any_cookies:
         error_msg = (
             "❌ <b>Не удалось скачать контент</b>\n\n"
             "<b>Возможные причины:</b>\n"
-            "• Instagram ввёл rate-limit (429 Too Many Requests)\n"
+            "• Instagram ввёл rate-limit (429)\n"
             "• Контент с возрастными ограничениями (18+)\n"
             "• Приватный аккаунт\n\n"
-            "<b>Решение для 18+ и rate-limit:</b>\n"
+            "<b>Решение:</b>\n"
             "Необходимо добавить cookies от авторизованного аккаунта Instagram.\n"
-            "Обратитесь к администратору бота.\n\n"
-            "<i>С cookies работают все методы и нет rate-limit</i>"
+            "Обратитесь к администратору бота."
         )
     else:
+        methods_tried = []
+        if global_cookies.exists():
+            methods_tried.append("cookies.txt")
+        if account_rotator.accounts:
+            methods_tried.extend([f"BOT_{i}" for i in range(1, len(account_rotator.accounts)+1)])
+        
         error_msg = (
             "❌ <b>Не удалось скачать контент</b>\n\n"
+            f"<b>Попробовано методов:</b> 8\n"
+            f"<b>Использованы cookies:</b> {', '.join(methods_tried)}\n\n"
             "<b>Возможные причины:</b>\n"
             "• Контент удален или недоступен\n"
             "• Приватный аккаунт\n"
             "• Instagram временно заблокировал доступ\n"
-            "• Неверная ссылка\n\n"
+            "• Все cookies получили rate-limit\n\n"
             "<b>Попробуйте:</b>\n"
-            "1. Проверить что аккаунт публичный\n"
-            "2. Скопировать ссылку заново\n"
-            "3. Подождать несколько минут"
+            "1. Подождать 10-15 минут\n"
+            "2. Проверить что аккаунт публичный\n"
+            "3. Скопировать ссылку заново"
         )
     
     return None, None, error_msg
-
 # === 📤 TIKTOK ФОТО ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     try:
