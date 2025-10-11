@@ -289,6 +289,51 @@ def load_cookies_from_file(cookies_file: Path) -> Dict[str, str]:
     return cookies
 
 # === 📸 INSTAGRAM РАЗДЕЛ ===
+
+async def extract_instagram_shortcode(url: str) -> Optional[str]:
+    """Извлекает shortcode из URL Instagram"""
+    match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
+    if match:
+        shortcode = match.group(1)
+        logger.debug(f"Извлечён shortcode: {shortcode}")
+        return shortcode
+    
+    if '/share/' in url:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(url, allow_redirects=True) as resp:
+                    final_url = str(resp.url)
+                    match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', final_url)
+                    if match:
+                        shortcode = match.group(1)
+                        logger.debug(f"Извлечён shortcode из /share/: {shortcode}")
+                        return shortcode
+        except Exception as e:
+            logger.warning(f"Не удалось резолвить /share/: {e}")
+    
+    return None
+
+
+def load_cookies_from_file(cookies_file: Path) -> Dict[str, str]:
+    """Загружает cookies из файла"""
+    cookies = {}
+    try:
+        with open(cookies_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip():
+                    continue
+                try:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 7:
+                        cookies[parts[5]] = parts[6]
+                except:
+                    continue
+        logger.debug(f"Загружено {len(cookies)} cookies из {cookies_file.name}")
+    except Exception as e:
+        logger.error(f"Ошибка чтения cookies: {e}")
+    return cookies
+
+
 async def download_instagram_mobile_api(shortcode: str, cookies_dict: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str], Optional[str]]:
     """
     Скачивание через Mobile API
@@ -473,7 +518,10 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     if not shortcode:
         return None, None, "❌ Некорректная ссылка на Instagram"
     
-    logger.info(f"📌 Instagram: {shortcode}")
+    # Определяем тип контента (reels/posts)
+    is_reel = '/reel/' in url.lower() or '/reels/' in url.lower()
+    
+    logger.info(f"📌 Instagram: {shortcode} ({'reel' if is_reel else 'post'})")
     
     # ШАГ 1: YT-DLP БЕЗ COOKIES
     logger.info("🔄 Попытка 1: yt-dlp без авторизации...")
@@ -618,64 +666,6 @@ async def send_instagram_content(chat_id: int, video_path: Optional[str], photos
         return False
     
     return False
-
-async def send_instagram_content(chat_id: int, video_path: Optional[str], photos: Optional[List[str]], description: Optional[str]):
-    """Отправка Instagram контента"""
-    try:
-        # Одиночное видео
-        if video_path and not photos:
-            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            if file_size_mb <= 50:
-                await bot.send_video(
-                    chat_id=chat_id,
-                    video=FSInputFile(video_path),
-                    caption=description[:1024] if description else None
-                )
-                return True
-            else:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"📦 Видео слишком большое ({file_size_mb:.1f} МБ)"
-                )
-                return False
-        
-        # Карусель
-        elif photos and len(photos) > 1:
-            media_group = []
-            
-            for idx, media_path in enumerate(photos[:10]):
-                ext = Path(media_path).suffix.lower()
-                
-                if ext in ['.mp4', '.mov']:
-                    media_group.append(
-                        InputMediaVideo(
-                            media=FSInputFile(media_path),
-                            caption=description[:1024] if idx == 0 and description else None
-                        )
-                    )
-                else:
-                    media_group.append(
-                        InputMediaPhoto(
-                            media=FSInputFile(media_path),
-                            caption=description[:1024] if idx == 0 and description else None
-                        )
-                    )
-            
-            await bot.send_media_group(chat_id=chat_id, media=media_group)
-            return True
-        
-        # Одиночное фото
-        elif photos and len(photos) == 1:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=FSInputFile(photos[0]),
-                caption=description[:1024] if description else None
-            )
-            return True
-    
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
-        return False
 
 # === 📤 TIKTOK ФОТО ===
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
