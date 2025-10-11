@@ -718,16 +718,22 @@ async def back_to_main(message: types.Message, state: FSMContext):
     )
 
 # === 🔗 ОБРАБОТЧИК ССЫЛОК ===
-@dp.message(F.text & ~F.text.startswith("/"))
+@dp.message(
+    F.text &
+    ~F.text.startswith("/") &
+    ~F.text.in_([
+        "⚙️ Настройки",
+        "🌟 Лучшее", "🎬 1080p", "📺 720p", "⚡ 480p", "📱 360p", "◀️ Назад"
+    ])
+)
 async def handle_link(message: types.Message, state: FSMContext):
-    # Игнорируем сообщения в режиме выбора качества
-    current_state = await state.get_state()
-    if current_state == VideoStates.choosing_quality:
+    if await state.get_state() is not None:
         return
     
     url = message.text.strip()
     if not is_valid_url(url):
-        return  # Игнорируем не-ссылки
+        await message.answer("⚠️ Отправьте корректную ссылку на YouTube, TikTok или Instagram")
+        return
     
     await check_rate_limit(message.from_user.id)
     platform = detect_platform(url)
