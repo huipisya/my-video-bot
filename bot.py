@@ -147,12 +147,39 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
 # === 📥 ОПТИМИЗИРОВАННОЕ СКАЧИВАНИЕ С INSTAGRAM ===
 
 async def extract_instagram_shortcode(url: str) -> Optional[str]:
-    """Извлекает shortcode из URL напрямую через regex (быстрее и надежнее)"""
+    """
+    Извлекает shortcode из URL Instagram
+    Поддерживает все форматы: /p/, /reel/, /reels/, /tv/, /share/
+    """
+    # Сначала пробуем стандартные форматы
     match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
     if match:
         shortcode = match.group(1)
         logger.info(f"📌 Извлечён shortcode: {shortcode}")
         return shortcode
+    
+    # Для /share/ нужно резолвить через yt-dlp
+    if '/share/' in url:
+        logger.info("🔄 Обнаружен /share/ формат, резолвим через yt-dlp...")
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'socket_timeout': 10,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                webpage_url = info.get('webpage_url', '')
+                if webpage_url:
+                    match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', webpage_url)
+                    if match:
+                        shortcode = match.group(1)
+                        logger.info(f"📌 Извлечён shortcode из /share/: {shortcode}")
+                        return shortcode
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось резолвить /share/ через yt-dlp: {e}")
+    
     logger.warning("⚠️ Не удалось извлечь shortcode из URL")
     return None
 
@@ -209,9 +236,15 @@ async def download_instagram_ytdlp(url: str, quality: str, cookies_file: Optiona
                 
     except yt_dlp.utils.DownloadError as e:
         error_str = str(e).lower()
-        if 'login required' in error_str or 'rate-limit' in error_str:
+        
+        # Обработка специфичных ошибок
+        if 'inappropriate' in error_str or 'unavailable for certain audiences' in error_str:
+            logger.warning("⚠️ yt-dlp: контент 18+ (inappropriate content)")
+            return None
+        elif 'login required' in error_str or 'rate-limit' in error_str:
             logger.warning("⚠️ yt-dlp: требуется авторизация или rate-limit")
             return None
+        
         logger.error(f"❌ yt-dlp error: {e}")
     except Exception as e:
         logger.error(f"❌ yt-dlp exception: {e}")
@@ -367,7 +400,7 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     4. Mobile API как запасной вариант
     
     Args:
-        url: Ссылка на Instagram
+        url: Ссылка на Instagram (включая /share/)
         quality: Качество видео (не используется, т.к. yt-dlp берет best)
         user_id: ID пользователя для персональных cookies
     
@@ -375,12 +408,19 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         (video_path, photos_list, description) или (None, None, error_message)
     """
     
-    # Извлекаем shortcode
+    # Извлекаем shortcode (поддерживает /share/)
     shortcode = await extract_instagram_shortcode(url)
     if not shortcode:
-        return None, None, "❌ Некорректная ссылка на Instagram"
+        return None, None, "❌ Некорректная ссылка на Instagram. Отправьте ссылку вида:\n• instagram.com/p/...\n• instagram.com/reel/...\n• instagram.com/share/..."
     
     logger.info(f"📌 Instagram shortcode: {shortcode}")
+    
+    # Проверяем наличие cookies ПЕРЕД началом загрузки
+    global_cookies = Path("cookies.txt")
+    user_cookies = Path(f"session/{user_id}_instagram_cookies.txt") if user_id else None
+    
+    has_global_cookies = global_cookies.exists()
+    has_user_cookies = user_cookies and user_cookies.exists()
     
     # === МЕТОД 1: yt-dlp БЕЗ cookies (публичный контент) ===
     logger.info("🔄 Попытка 1/4: yt-dlp без cookies")
@@ -390,38 +430,35 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         return (result, None, None)
     
     # === МЕТОД 2: yt-dlp С ГЛОБАЛЬНЫМИ cookies ===
-    global_cookies = Path("cookies.txt")
-    if global_cookies.exists():
+    if has_global_cookies:
         logger.info("🔄 Попытка 2/4: yt-dlp с глобальными cookies")
         result = await download_instagram_ytdlp(url, quality, global_cookies)
         if result and os.path.exists(result):
             logger.info("✅ Успешно скачано (глобальные cookies)")
             return (result, None, None)
+    else:
+        logger.info("⏭️ Пропуск попытки 2/4: глобальные cookies отсутствуют")
     
     # === МЕТОД 3: yt-dlp С ПОЛЬЗОВАТЕЛЬСКИМИ cookies (для 18+) ===
-    if user_id:
-        user_cookies = Path(f"session/{user_id}_instagram_cookies.txt")
-        if user_cookies.exists():
-            logger.info(f"🔄 Попытка 3/4: yt-dlp с cookies пользователя {user_id}")
-            result = await download_instagram_ytdlp(url, quality, user_cookies)
-            if result and os.path.exists(result):
-                logger.info(f"✅ Успешно скачано (cookies пользователя {user_id})")
-                return (result, None, None)
-        else:
-            logger.debug(f"ℹ️ Cookies пользователя {user_id} не найдены")
+    if has_user_cookies:
+        logger.info(f"🔄 Попытка 3/4: yt-dlp с cookies пользователя {user_id}")
+        result = await download_instagram_ytdlp(url, quality, user_cookies)
+        if result and os.path.exists(result):
+            logger.info(f"✅ Успешно скачано (cookies пользователя {user_id})")
+            return (result, None, None)
+    else:
+        logger.info(f"⏭️ Пропуск попытки 3/4: cookies пользователя отсутствуют")
     
     # === МЕТОД 4: Mobile API как запасной вариант ===
     logger.info("🔄 Попытка 4/4: Mobile API")
     
     # Пробуем с пользовательскими cookies если есть
     cookies_dict = None
-    if user_id:
-        user_cookies = Path(f"session/{user_id}_instagram_cookies.txt")
-        if user_cookies.exists():
-            cookies_dict = load_cookies_from_file(user_cookies)
+    if has_user_cookies:
+        cookies_dict = load_cookies_from_file(user_cookies)
     
     # Если нет пользовательских, пробуем глобальные
-    if not cookies_dict and global_cookies.exists():
+    if not cookies_dict and has_global_cookies:
         cookies_dict = load_cookies_from_file(global_cookies)
     
     video_path, photos, description = await download_instagram_mobile_api(shortcode, cookies_dict)
@@ -433,18 +470,30 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     # === ВСЕ МЕТОДЫ НЕ СРАБОТАЛИ ===
     logger.error("❌ Все методы не сработали")
     
-    error_msg = (
-        "❌ <b>Не удалось скачать контент</b>\n\n"
-        "<b>Возможные причины:</b>\n"
-        "• Контент с возрастными ограничениями (18+)\n"
-        "• Приватный аккаунт\n"
-        "• Контент удален\n"
-        "• Instagram временно заблокировал доступ\n\n"
-        "<b>Решение:</b>\n"
-        "1. Убедитесь что аккаунт публичный\n"
-        "2. Для 18+ контента попросите администратора добавить cookies\n"
-        "3. Попробуйте другую ссылку"
-    )
+    # Формируем детальное сообщение об ошибке
+    if not has_global_cookies and not has_user_cookies:
+        error_msg = (
+            "❌ <b>Не удалось скачать контент</b>\n\n"
+            "Скорее всего это контент с возрастными ограничениями (18+).\n\n"
+            "<b>Для скачивания 18+ контента:</b>\n"
+            "1. Войдите в Instagram через браузер\n"
+            "2. Экспортируйте cookies в формате Netscape\n"
+            "3. Отправьте файл администратору бота\n\n"
+            "<i>Обычный контент (без 18+) скачивается без cookies</i>"
+        )
+    else:
+        error_msg = (
+            "❌ <b>Не удалось скачать контент</b>\n\n"
+            "<b>Возможные причины:</b>\n"
+            "• Контент удален или недоступен\n"
+            "• Приватный аккаунт\n"
+            "• Instagram временно заблокировал доступ\n"
+            "• Неверная ссылка\n\n"
+            "<b>Попробуйте:</b>\n"
+            "1. Убедиться что аккаунт публичный\n"
+            "2. Скопировать ссылку заново\n"
+            "3. Подождать несколько минут"
+        )
     
     return None, None, error_msg
 
