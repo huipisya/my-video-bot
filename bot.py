@@ -127,14 +127,15 @@ def set_quality_setting(user_id: int, quality: str):
 
 def get_ydl_opts(quality: str = "best") -> dict:
     opts = {
-        'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
-        'merge_output_format': 'mp4',
+        'format': 'best[ext=mp4]/best',  # Упрощённый формат
         'noplaylist': True,
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android']  # Используем Android клиент
+            }
         },
     }
     proxy = os.getenv("PROXY_URL")
