@@ -73,6 +73,7 @@ init_cookies_from_env()
 
 # === 🔄 РОТАЦИЯ АККАУНТОВ INSTAGRAM ===
 class BotAccount:
+
     def __init__(self, name: str, cookies_file: Path):
         self.name = name
         self.cookies_file = cookies_file
@@ -1110,7 +1111,7 @@ async def main():
             await runner.cleanup()
             await bot.session.close()
     else:
-        logger.info("🔄 Запуск в режиме long polling (локалyно)")
+        logger.info("🔄 Запуск в режиме long polling (локально)")
         await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
