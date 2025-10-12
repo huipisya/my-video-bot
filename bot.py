@@ -193,24 +193,19 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
 
-# === 📸 INSTAGRAM РАЗДЕЛ (БЕЗ COOKIES В ПРИОРИТЕТЕ) ===
+# === 📸 INSTAGRAM РАЗДЕЛ (1080p SUPPORT, БЕЗ ПРОКСИ) ===
 
 async def extract_instagram_shortcode(url: str) -> Optional[Tuple[str, bool]]:
-    """
-    Извлекает shortcode из URL Instagram
-    Returns: (shortcode, is_reel) или None
-    """
+    """Извлекает shortcode из URL Instagram"""
     url_lower = url.lower()
     is_reel = '/reel/' in url_lower or '/reels/' in url_lower
     
-    # Обычные ссылки
     match = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
     if match:
         shortcode = match.group(1)
         logger.info(f"📌 Shortcode: {shortcode} ({'REEL' if is_reel else 'POST'})")
         return (shortcode, is_reel)
     
-    # Короткие ссылки /share/
     if '/share/' in url or 'instagram.com/s/' in url_lower:
         try:
             logger.info("🔄 Резолвинг короткой ссылки...")
@@ -226,7 +221,7 @@ async def extract_instagram_shortcode(url: str) -> Optional[Tuple[str, bool]]:
                         logger.info(f"✅ Shortcode: {shortcode} ({'REEL' if is_reel else 'POST'})")
                         return (shortcode, is_reel)
         except Exception as e:
-            logger.error(f"❌ Не удалось резолвить /share/: {e}")
+            logger.error(f"❌ Не удалось резолвить: {e}")
     
     return None
 
@@ -251,10 +246,25 @@ def load_cookies_from_file(cookies_file: Path) -> Dict[str, str]:
     return cookies
 
 
-async def download_instagram_mobile_api_public(shortcode: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str], Optional[str]]:
+async def download_file_ig(url: str, save_path: str, timeout: int = 60) -> bool:
+    """Скачивает файл для Instagram"""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    with open(save_path, 'wb') as f:
+                        async for chunk in resp.content.iter_chunked(8192):
+                            f.write(chunk)
+                    return True
+    except Exception as e:
+        logger.error(f"Ошибка скачивания: {e}")
+    return False
+
+
+async def download_instagram_mobile_api_public(shortcode: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str], Optional[str]]:
     """
-    Mobile API БЕЗ авторизации (публичный метод)
-    Returns: (video_path, photos_list, description, error_code)
+    Mobile API БЕЗ cookies - ПРИОРИТЕТНЫЙ МЕТОД
+    Поддерживает качество: best, 1080p, 720p, 480p, 360p
     """
     try:
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
@@ -294,16 +304,58 @@ async def download_instagram_mobile_api_public(shortcode: str) -> Tuple[Optional
                 if len(description) > 200:
                     description = description[:200] + '...'
                 
+                # Функция выбора качества для видео
+                def select_video_quality(versions, quality):
+                    if not versions:
+                        return None
+                    
+                    # Сортируем по высоте (от большего к меньшему)
+                    sorted_versions = sorted(versions, key=lambda x: x.get('height', 0), reverse=True)
+                    
+                    if quality == "best":
+                        return sorted_versions[0].get('url')
+                    
+                    # Карта качества
+                    quality_map = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+                    target_height = quality_map.get(quality, 1080)
+                    
+                    # Ищем ближайшее подходящее
+                    for version in sorted_versions:
+                        if version.get('height', 0) <= target_height:
+                            return version.get('url')
+                    
+                    # Если не нашли, берем минимальное
+                    return sorted_versions[-1].get('url')
+                
+                # Функция выбора качества для фото
+                def select_image_quality(candidates, quality):
+                    if not candidates:
+                        return None
+                    
+                    sorted_candidates = sorted(candidates, key=lambda x: x.get('width', 0), reverse=True)
+                    
+                    if quality == "best":
+                        return sorted_candidates[0].get('url')
+                    
+                    quality_map = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+                    target_width = quality_map.get(quality, 1080)
+                    
+                    for candidate in sorted_candidates:
+                        if candidate.get('width', 0) <= target_width:
+                            return candidate.get('url')
+                    
+                    return sorted_candidates[-1].get('url')
+                
                 # ВИДЕО
                 if media_type == 2:
                     video_versions = media.get('video_versions', [])
-                    if video_versions:
-                        video_url = video_versions[0].get('url')
-                        if video_url:
-                            video_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}.mp4")
-                            if await download_file(video_url, video_path, timeout=60):
-                                logger.info("✅ Mobile API публичный: видео")
-                                return (video_path, None, description, None)
+                    video_url = select_video_quality(video_versions, quality)
+                    
+                    if video_url:
+                        video_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}.mp4")
+                        if await download_file_ig(video_url, video_path, timeout=60):
+                            logger.info(f"✅ Mobile API публичный: видео {quality}")
+                            return (video_path, None, description, None)
                 
                 # КАРУСЕЛЬ
                 elif media_type == 8:
@@ -315,36 +367,36 @@ async def download_instagram_mobile_api_public(shortcode: str) -> Tuple[Optional
                         
                         if item_type == 2:  # Видео
                             video_versions = item.get('video_versions', [])
-                            if video_versions:
-                                video_url = video_versions[0].get('url')
-                                if video_url:
-                                    video_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}_v{idx}.mp4")
-                                    if await download_file(video_url, video_path, timeout=60):
-                                        all_media.append(video_path)
+                            video_url = select_video_quality(video_versions, quality)
+                            
+                            if video_url:
+                                video_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}_v{idx}.mp4")
+                                if await download_file_ig(video_url, video_path, timeout=60):
+                                    all_media.append(video_path)
                         
                         elif item_type == 1:  # Фото
                             img_candidates = item.get('image_versions2', {}).get('candidates', [])
-                            if img_candidates:
-                                img_url = img_candidates[0].get('url')
-                                if img_url:
-                                    photo_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}_p{idx}.jpg")
-                                    if await download_file(img_url, photo_path, timeout=30):
-                                        all_media.append(photo_path)
+                            img_url = select_image_quality(img_candidates, quality)
+                            
+                            if img_url:
+                                photo_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}_p{idx}.jpg")
+                                if await download_file_ig(img_url, photo_path, timeout=30):
+                                    all_media.append(photo_path)
                     
                     if all_media:
-                        logger.info(f"✅ Mobile API публичный: карусель ({len(all_media)} элементов)")
+                        logger.info(f"✅ Mobile API публичный: карусель ({len(all_media)} элементов) {quality}")
                         return (None, all_media, description, None)
                 
                 # ФОТО
                 elif media_type == 1:
                     img_candidates = media.get('image_versions2', {}).get('candidates', [])
-                    if img_candidates:
-                        img_url = img_candidates[0].get('url')
-                        if img_url:
-                            photo_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}.jpg")
-                            if await download_file(img_url, photo_path, timeout=30):
-                                logger.info("✅ Mobile API публичный: фото")
-                                return (None, [photo_path], description, None)
+                    img_url = select_image_quality(img_candidates, quality)
+                    
+                    if img_url:
+                        photo_path = os.path.join(tempfile.gettempdir(), f"ig_pub_{shortcode}.jpg")
+                        if await download_file_ig(img_url, photo_path, timeout=30):
+                            logger.info(f"✅ Mobile API публичный: фото {quality}")
+                            return (None, [photo_path], description, None)
     
     except Exception as e:
         logger.error(f"❌ Mobile API публичный: {e}")
@@ -352,14 +404,25 @@ async def download_instagram_mobile_api_public(shortcode: str) -> Tuple[Optional
     return None, None, None, 'other'
 
 
-async def download_instagram_yt_dlp_public(url: str) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    """
-    yt-dlp БЕЗ cookies (публичный метод)
-    Returns: (video_path, photos_list, description)
-    """
+async def download_instagram_yt_dlp_public(url: str, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """yt-dlp БЕЗ cookies (резервный метод)"""
     try:
+        # Формат для yt-dlp
+        if quality == "best":
+            format_str = 'best'
+        elif quality == "1080p":
+            format_str = 'best[height<=1080]'
+        elif quality == "720p":
+            format_str = 'best[height<=720]'
+        elif quality == "480p":
+            format_str = 'best[height<=480]'
+        elif quality == "360p":
+            format_str = 'best[height<=360]'
+        else:
+            format_str = 'best'
+        
         ydl_opts = {
-            'format': 'best',
+            'format': format_str,
             'merge_output_format': 'mp4',
             'noplaylist': False,
             'outtmpl': os.path.join(tempfile.gettempdir(), 'ig_ytdlp_pub_%(id)s_%(autonumber)s.%(ext)s'),
@@ -375,7 +438,6 @@ async def download_instagram_yt_dlp_public(url: str) -> Tuple[Optional[str], Opt
             if description and len(description) > 200:
                 description = description[:200] + '...'
             
-            # Карусель
             if info.get('_type') == 'playlist':
                 downloaded_files = []
                 for entry in info.get('entries', []):
@@ -384,32 +446,27 @@ async def download_instagram_yt_dlp_public(url: str) -> Tuple[Optional[str], Opt
                         downloaded_files.append(file_path)
                 
                 if downloaded_files:
-                    logger.info(f"✅ yt-dlp публичный: карусель ({len(downloaded_files)} файлов)")
+                    logger.info(f"✅ yt-dlp публичный: карусель ({len(downloaded_files)} файлов) {quality}")
                     return (None, downloaded_files, description)
-            
-            # Одиночное видео/фото
             else:
                 temp_file = ydl.prepare_filename(info)
                 if temp_file and os.path.exists(temp_file):
                     ext = Path(temp_file).suffix.lower()
                     if ext in ['.mp4', '.mov']:
-                        logger.info("✅ yt-dlp публичный: видео")
+                        logger.info(f"✅ yt-dlp публичный: видео {quality}")
                         return (temp_file, None, description)
                     elif ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                        logger.info("✅ yt-dlp публичный: фото")
+                        logger.info(f"✅ yt-dlp публичный: фото {quality}")
                         return (None, [temp_file], description)
     
     except Exception as e:
-        logger.debug(f"yt-dlp публичный не сработал: {str(e)[:100]}")
+        logger.debug(f"yt-dlp публичный: {str(e)[:100]}")
     
     return None, None, None
 
 
-async def download_instagram_mobile_api_cookies(shortcode: str, cookies_dict: Dict[str, str]) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    """
-    Mobile API С cookies (для 18+/приватного контента)
-    Returns: (video_path, photos_list, description)
-    """
+async def download_instagram_mobile_api_cookies(shortcode: str, cookies_dict: Dict[str, str], quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """Mobile API С cookies (для приватного контента)"""
     try:
         api_url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
         
@@ -444,16 +501,42 @@ async def download_instagram_mobile_api_cookies(shortcode: str, cookies_dict: Di
                 if len(description) > 200:
                     description = description[:200] + '...'
                 
+                # Функции выбора качества (те же что и выше)
+                def select_video_quality(versions, quality):
+                    if not versions:
+                        return None
+                    sorted_versions = sorted(versions, key=lambda x: x.get('height', 0), reverse=True)
+                    if quality == "best":
+                        return sorted_versions[0].get('url')
+                    quality_map = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+                    target_height = quality_map.get(quality, 1080)
+                    for version in sorted_versions:
+                        if version.get('height', 0) <= target_height:
+                            return version.get('url')
+                    return sorted_versions[-1].get('url')
+                
+                def select_image_quality(candidates, quality):
+                    if not candidates:
+                        return None
+                    sorted_candidates = sorted(candidates, key=lambda x: x.get('width', 0), reverse=True)
+                    if quality == "best":
+                        return sorted_candidates[0].get('url')
+                    quality_map = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+                    target_width = quality_map.get(quality, 1080)
+                    for candidate in sorted_candidates:
+                        if candidate.get('width', 0) <= target_width:
+                            return candidate.get('url')
+                    return sorted_candidates[-1].get('url')
+                
                 # ВИДЕО
                 if media_type == 2:
                     video_versions = media.get('video_versions', [])
-                    if video_versions:
-                        video_url = video_versions[0].get('url')
-                        if video_url:
-                            video_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}.mp4")
-                            if await download_file(video_url, video_path, timeout=60):
-                                logger.info("✅ Mobile API + cookies: видео")
-                                return (video_path, None, description)
+                    video_url = select_video_quality(video_versions, quality)
+                    if video_url:
+                        video_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}.mp4")
+                        if await download_file_ig(video_url, video_path, timeout=60):
+                            logger.info(f"✅ Mobile API + cookies: видео {quality}")
+                            return (video_path, None, description)
                 
                 # КАРУСЕЛЬ
                 elif media_type == 8:
@@ -465,36 +548,33 @@ async def download_instagram_mobile_api_cookies(shortcode: str, cookies_dict: Di
                         
                         if item_type == 2:
                             video_versions = item.get('video_versions', [])
-                            if video_versions:
-                                video_url = video_versions[0].get('url')
-                                if video_url:
-                                    video_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}_v{idx}.mp4")
-                                    if await download_file(video_url, video_path, timeout=60):
-                                        all_media.append(video_path)
+                            video_url = select_video_quality(video_versions, quality)
+                            if video_url:
+                                video_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}_v{idx}.mp4")
+                                if await download_file_ig(video_url, video_path, timeout=60):
+                                    all_media.append(video_path)
                         
                         elif item_type == 1:
                             img_candidates = item.get('image_versions2', {}).get('candidates', [])
-                            if img_candidates:
-                                img_url = img_candidates[0].get('url')
-                                if img_url:
-                                    photo_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}_p{idx}.jpg")
-                                    if await download_file(img_url, photo_path, timeout=30):
-                                        all_media.append(photo_path)
+                            img_url = select_image_quality(img_candidates, quality)
+                            if img_url:
+                                photo_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}_p{idx}.jpg")
+                                if await download_file_ig(img_url, photo_path, timeout=30):
+                                    all_media.append(photo_path)
                     
                     if all_media:
-                        logger.info(f"✅ Mobile API + cookies: карусель ({len(all_media)} элементов)")
+                        logger.info(f"✅ Mobile API + cookies: карусель ({len(all_media)} элементов) {quality}")
                         return (None, all_media, description)
                 
                 # ФОТО
                 elif media_type == 1:
                     img_candidates = media.get('image_versions2', {}).get('candidates', [])
-                    if img_candidates:
-                        img_url = img_candidates[0].get('url')
-                        if img_url:
-                            photo_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}.jpg")
-                            if await download_file(img_url, photo_path, timeout=30):
-                                logger.info("✅ Mobile API + cookies: фото")
-                                return (None, [photo_path], description)
+                    img_url = select_image_quality(img_candidates, quality)
+                    if img_url:
+                        photo_path = os.path.join(tempfile.gettempdir(), f"ig_auth_{shortcode}.jpg")
+                        if await download_file_ig(img_url, photo_path, timeout=30):
+                            logger.info(f"✅ Mobile API + cookies: фото {quality}")
+                            return (None, [photo_path], description)
     
     except Exception as e:
         logger.error(f"❌ Mobile API + cookies: {e}")
@@ -502,14 +582,24 @@ async def download_instagram_mobile_api_cookies(shortcode: str, cookies_dict: Di
     return None, None, None
 
 
-async def download_instagram_yt_dlp_cookies(url: str, cookies_file: Path) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    """
-    yt-dlp С cookies (резервный метод)
-    Returns: (video_path, photos_list, description)
-    """
+async def download_instagram_yt_dlp_cookies(url: str, cookies_file: Path, quality: str = "best") -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
+    """yt-dlp С cookies (финальный резерв)"""
     try:
+        if quality == "best":
+            format_str = 'best'
+        elif quality == "1080p":
+            format_str = 'best[height<=1080]'
+        elif quality == "720p":
+            format_str = 'best[height<=720]'
+        elif quality == "480p":
+            format_str = 'best[height<=480]'
+        elif quality == "360p":
+            format_str = 'best[height<=360]'
+        else:
+            format_str = 'best'
+        
         ydl_opts = {
-            'format': 'best',
+            'format': format_str,
             'merge_output_format': 'mp4',
             'noplaylist': False,
             'outtmpl': os.path.join(tempfile.gettempdir(), 'ig_ytdlp_auth_%(id)s_%(autonumber)s.%(ext)s'),
@@ -526,7 +616,6 @@ async def download_instagram_yt_dlp_cookies(url: str, cookies_file: Path) -> Tup
             if description and len(description) > 200:
                 description = description[:200] + '...'
             
-            # Карусель
             if info.get('_type') == 'playlist':
                 downloaded_files = []
                 for entry in info.get('entries', []):
@@ -535,23 +624,21 @@ async def download_instagram_yt_dlp_cookies(url: str, cookies_file: Path) -> Tup
                         downloaded_files.append(file_path)
                 
                 if downloaded_files:
-                    logger.info(f"✅ yt-dlp + cookies: карусель ({len(downloaded_files)} файлов)")
+                    logger.info(f"✅ yt-dlp + cookies: карусель ({len(downloaded_files)} файлов) {quality}")
                     return (None, downloaded_files, description)
-            
-            # Одиночное
             else:
                 temp_file = ydl.prepare_filename(info)
                 if temp_file and os.path.exists(temp_file):
                     ext = Path(temp_file).suffix.lower()
                     if ext in ['.mp4', '.mov']:
-                        logger.info("✅ yt-dlp + cookies: видео")
+                        logger.info(f"✅ yt-dlp + cookies: видео {quality}")
                         return (temp_file, None, description)
                     elif ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                        logger.info("✅ yt-dlp + cookies: фото")
+                        logger.info(f"✅ yt-dlp + cookies: фото {quality}")
                         return (None, [temp_file], description)
     
     except Exception as e:
-        logger.debug(f"yt-dlp + cookies не сработал: {str(e)[:100]}")
+        logger.debug(f"yt-dlp + cookies: {str(e)[:100]}")
     
     return None, None, None
 
@@ -559,12 +646,7 @@ async def download_instagram_yt_dlp_cookies(url: str, cookies_file: Path) -> Tup
 async def download_instagram(url: str, quality: str = "best", user_id: Optional[int] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
     """
     Главная функция скачивания Instagram
-    
-    НОВАЯ ЛОГИКА (БЕЗ COOKIES В ПРИОРИТЕТЕ):
-    1. Mobile API БЕЗ cookies (быстро, 95% контента)
-    2. yt-dlp БЕЗ cookies (резерв для публичного)
-    3. Mobile API С cookies (для 18+/приватного)
-    4. yt-dlp С cookies (финальный резерв)
+    Поддерживает качество: best, 1080p, 720p, 480p, 360p
     """
     result = await extract_instagram_shortcode(url)
     if not result:
@@ -572,9 +654,9 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     
     shortcode, is_reel = result
     
-    # === ШАГ 1: MOBILE API БЕЗ COOKIES ===
-    logger.info("🔄 Шаг 1/4: Mobile API (публичный)...")
-    video_path, photos, description, error_code = await download_instagram_mobile_api_public(shortcode)
+    # ШАГ 1: MOBILE API БЕЗ COOKIES
+    logger.info(f"🔄 Шаг 1/4: Mobile API (публичный) качество={quality}...")
+    video_path, photos, description, error_code = await download_instagram_mobile_api_public(shortcode, quality)
     
     if video_path or photos:
         final_description = None if is_reel else description
@@ -583,19 +665,18 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     if error_code == '404':
         return None, None, "❌ Контент не найден или удалён"
     
-    # === ШАГ 2: YT-DLP БЕЗ COOKIES ===
-    logger.info("🔄 Шаг 2/4: yt-dlp (публичный)...")
-    video_path, photos, description = await download_instagram_yt_dlp_public(url)
+    # ШАГ 2: YT-DLP БЕЗ COOKIES
+    logger.info(f"🔄 Шаг 2/4: yt-dlp (публичный) качество={quality}...")
+    video_path, photos, description = await download_instagram_yt_dlp_public(url, quality)
     
     if video_path or photos:
         final_description = None if is_reel else description
         return (video_path, photos, final_description)
     
-    # === ШАГ 3 и 4: ТРЕБУЕТСЯ АВТОРИЗАЦИЯ ===
+    # ШАГ 3-4: С COOKIES
     if error_code in ['403', 'other']:
         logger.info("🔐 Контент защищён, пробуем с cookies...")
         
-        # Собираем все cookies файлы
         cookies_files = []
         if Path("cookies.txt").exists():
             cookies_files.append(Path("cookies.txt"))
@@ -607,24 +688,21 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         if not cookies_files:
             return None, None, (
                 "❌ Контент недоступен (18+ или приватный)\n\n"
-                "Для скачивания необходимы cookies Instagram."
+                "Для скачивания необходимы cookies."
             )
         
-        # Пробуем каждый cookies файл
         for idx, cookies_file in enumerate(cookies_files, 1):
-            logger.info(f"🔄 Шаг 3/4 ({idx}/{len(cookies_files)}): {cookies_file.name}...")
+            logger.info(f"🔄 Шаг 3/4 ({idx}/{len(cookies_files)}): {cookies_file.name} качество={quality}...")
             
-            # Mobile API с cookies
             cookies_dict = load_cookies_from_file(cookies_file)
             if cookies_dict:
-                video_path, photos, description = await download_instagram_mobile_api_cookies(shortcode, cookies_dict)
+                video_path, photos, description = await download_instagram_mobile_api_cookies(shortcode, cookies_dict, quality)
                 if video_path or photos:
                     final_description = None if is_reel else description
                     return (video_path, photos, final_description)
             
-            # yt-dlp с cookies
-            logger.info(f"🔄 Шаг 4/4 ({idx}/{len(cookies_files)}): yt-dlp + {cookies_file.name}...")
-            video_path, photos, description = await download_instagram_yt_dlp_cookies(url, cookies_file)
+            logger.info(f"🔄 Шаг 4/4 ({idx}/{len(cookies_files)}): yt-dlp + {cookies_file.name} качество={quality}...")
+            video_path, photos, description = await download_instagram_yt_dlp_cookies(url, cookies_file, quality)
             if video_path or photos:
                 final_description = None if is_reel else description
                 return (video_path, photos, final_description)
@@ -632,16 +710,16 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         return None, None, (
             "❌ Не удалось скачать контент\n\n"
             "Возможные причины:\n"
-            "• Приватный аккаунт (бот не подписан)\n"
-            "• Cookies устарели или забанены\n"
-            "• Контент удалён владельцем"
+            "• Приватный аккаунт\n"
+            "• Cookies устарели\n"
+            "• Контент удалён"
         )
     
     return None, None, "❌ Неизвестная ошибка"
 
 
 async def send_instagram_content(chat_id: int, video_path: Optional[str], photos: Optional[List[str]], description: Optional[str]):
-    """Отправка Instagram контента (с поддержкой больших каруселей)"""
+    """Отправка Instagram контента"""
     try:
         # Одиночное видео
         if video_path and not photos:
@@ -656,11 +734,11 @@ async def send_instagram_content(chat_id: int, video_path: Optional[str], photos
             else:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"📦 Видео слишком большое ({file_size_mb:.1f} МБ)\nМаксимум: 50 МБ"
+                    text=f"📦 Видео слишком большое ({file_size_mb:.1f} МБ)"
                 )
                 return False
         
-        # Карусель/фото - батчи по 10
+        # Карусель
         elif photos:
             total = len(photos)
             logger.info(f"📤 Отправка {total} файлов...")
@@ -996,7 +1074,8 @@ async def main():
             await bot.session.close()
     else:
         logger.info("🔄 Запускаю в режиме long polling")
-        await dp.start_polling(bot, skip_updates=True)
+        await dp.start_polling(bot, skip_updates=True) 
 
 if __name__ == "__main__":
     asyncio.run(main())
+# === .gitignore ===                        
