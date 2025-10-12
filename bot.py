@@ -138,17 +138,8 @@ def set_quality_setting(user_id: int, quality: str):
     logger.info(f"💾 Качество '{quality}' сохранено для user {user_id}")
 
 def get_ydl_opts(quality: str = "best") -> dict:
-    # Улучшенные форматы для YouTube (включая Shorts)
-    quality_formats = {
-        "best": 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-        "1080p": 'bestvideo[ext=mp4][height<=1920][width<=1920]+bestaudio[ext=m4a]/bestvideo[height<=1920]+bestaudio/best',
-        "720p": 'bestvideo[ext=mp4][height<=1280][width<=1280]+bestaudio[ext=m4a]/bestvideo[height<=1280]+bestaudio/best',
-        "480p": 'bestvideo[ext=mp4][height<=854][width<=854]+bestaudio[ext=m4a]/bestvideo[height<=854]+bestaudio/best',
-        "360p": 'bestvideo[ext=mp4][height<=640][width<=640]+bestaudio[ext=m4a]/bestvideo[height<=640]+bestaudio/best'
-    }
-    
     opts = {
-        'format': quality_formats.get(quality, quality_formats["best"]),
+        'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),  # ← Используем глобальные форматы!
         'merge_output_format': 'mp4',
         'noplaylist': True,
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
