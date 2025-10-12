@@ -126,36 +126,19 @@ def set_quality_setting(user_id: int, quality: str):
     logger.info(f"💾 Качество '{quality}' сохранено для user {user_id}")
 
 def get_ydl_opts(quality: str = "best") -> dict:
-    # Форматы С ОБЪЕДИНЕНИЕМ (требуют ffmpeg)
-    quality_formats = {
-        "best": 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        "1080p": 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
-        "720p": 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
-        "480p": 'bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best',
-        "360p": 'bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best'
-    }
-    
     opts = {
-        'format': quality_formats.get(quality, quality_formats["best"]),
-        'merge_output_format': 'mp4',  # ← ВАЖНО!
+        'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),  # ← Используем глобальные форматы!
+        'merge_output_format': 'mp4',
         'noplaylist': True,
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'mweb'],
-                'player_skip': ['configs', 'webpage'],
-                'skip': ['dash', 'hls']
-            }
-        },
         'http_headers': {
-            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
     }
     
-    # YouTube cookies
+    # YouTube cookies (если есть)
     if Path("cookies_youtube.txt").exists():
         opts['cookiefile'] = 'cookies_youtube.txt'
         logger.info("🍪 Используем YouTube cookies")
