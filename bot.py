@@ -139,7 +139,7 @@ def set_quality_setting(user_id: int, quality: str):
 
 def get_ydl_opts(quality: str = "best") -> dict:
     opts = {
-        'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),  # ← Используем глобальные форматы!
+        'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
         'merge_output_format': 'mp4',
         'noplaylist': True,
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
@@ -149,6 +149,18 @@ def get_ydl_opts(quality: str = "best") -> dict:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
     }
+    
+    # YouTube cookies (если есть)
+    if Path("cookies_youtube.txt").exists():
+        opts['cookiefile'] = 'cookies_youtube.txt'
+        logger.info("🍪 Используем YouTube cookies")
+    
+    # Proxy
+    proxy = os.getenv("PROXY_URL")
+    if proxy:
+        opts['proxy'] = proxy
+    
+    return opts
     
     # YouTube cookies (если есть)
     if Path("cookies_youtube.txt").exists():
