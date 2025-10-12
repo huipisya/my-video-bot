@@ -45,7 +45,7 @@ def init_cookies_from_env():
         logger.info(f"✅ Создан cookies.txt")
         cookies_created += 1
     
-    # Проверяем cookies_bot1/2/3
+    # Проверяем cookies_bot1/2/3 (Instagram)
     for i in range(1, 4):
         env_var = f"COOKIES_BOT{i}"
         cookies_content = os.getenv(env_var)
@@ -55,6 +55,18 @@ def init_cookies_from_env():
                 f.write(cookies_content)
             logger.info(f"✅ Создан cookies_bot{i}")
             cookies_created += 1
+    
+    # Проверяем YouTube cookies
+    youtube_cookies = os.getenv("COOKIES_YOUTUBE")
+    if youtube_cookies:
+        cookies_file = Path("cookies_youtube.txt")
+        with open(cookies_file, 'w', encoding='utf-8') as f:
+            # Добавляем заголовок если его нет
+            if not youtube_cookies.strip().startswith('#'):
+                f.write("# Netscape HTTP Cookie File\n")
+            f.write(youtube_cookies)
+        logger.info(f"✅ Создан cookies_youtube.txt")
+        cookies_created += 1
     
     if cookies_created == 0:
         logger.warning("⚠️ Не найдено cookies в переменных окружения")
