@@ -25,4 +25,4 @@ instaloader
 browser-cookie3
 instagrapi
 redis[hiredis]==5.2.0
-playwright
+# пока
