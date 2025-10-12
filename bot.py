@@ -127,19 +127,34 @@ def set_quality_setting(user_id: int, quality: str):
 
 def get_ydl_opts(quality: str = "best") -> dict:
     opts = {
-        'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
-        'merge_output_format': 'mp4',
+        'format': 'best',  # Упрощённый формат
         'noplaylist': True,
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb'],
+                'player_skip': ['configs', 'webpage'],
+                'skip': ['dash', 'hls']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+            'Accept-Language': 'en-US,en;q=0.9',
         },
     }
+    
+    # YouTube cookies
+    if Path("cookies_youtube.txt").exists():
+        opts['cookiefile'] = 'cookies_youtube.txt'
+        logger.info("🍪 Используем YouTube cookies")
+    
+    # Proxy
     proxy = os.getenv("PROXY_URL")
     if proxy:
         opts['proxy'] = proxy
+    
     return opts
 
 def is_valid_url(url: str) -> bool:
