@@ -22,3 +22,7 @@ urllib3==2.5.0
 yarl==1.20.1
 yt-dlp==2025.9.26
 instaloader
+browser-cookie3
+instagrapi
+redis[hiredis]==5.2.0
+playwright
