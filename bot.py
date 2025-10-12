@@ -204,7 +204,6 @@ async def download_file(url: str, save_path: str, timeout: int = 60) -> bool:
     except Exception as e:
         logger.error(f"Ошибка скачивания файла {url}: {e}")
     return False
-
 # === 📸 INSTAGRAM РАЗДЕЛ (ЧИСТАЯ ВЕРСИЯ С КАЧЕСТВОМ) ===
 
 import random
@@ -427,18 +426,19 @@ async def download_instagram_mobile_api(shortcode: str, quality: str = "best", c
 
 
 async def download_instagram_yt_dlp(url: str, quality: str = "best", cookies_file: Optional[Path] = None) -> Tuple[Optional[str], Optional[List[str]], Optional[str]]:
-    """yt-dlp с поддержкой качества"""
+    """yt-dlp с поддержкой качества (УПРОЩЕННЫЕ ФОРМАТЫ для Instagram)"""
     try:
+        # Instagram Reels часто имеют только 1 версию - берем просто best
         if quality == "best":
             format_str = 'best'
         elif quality == "1080p":
-            format_str = 'best[height<=1080]'
+            format_str = 'best/bestvideo+bestaudio'  # Убрали строгий фильтр
         elif quality == "720p":
-            format_str = 'best[height<=720]'
+            format_str = 'best/bestvideo+bestaudio'
         elif quality == "480p":
-            format_str = 'best[height<=480]'
+            format_str = 'best/bestvideo+bestaudio'
         elif quality == "360p":
-            format_str = 'best[height<=360]'
+            format_str = 'best/bestvideo+bestaudio'
         else:
             format_str = 'best'
         
@@ -545,11 +545,11 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     """
     Главная функция скачивания Instagram с поддержкой качества
     
-    ПОРЯДОК:
-    1. yt-dlp публичный (быстро)
-    2. Mobile API публичный
-    3. Mobile API + cookies (для приватного)
-    4. yt-dlp + cookies
+    НОВЫЙ ПОРЯДОК (самый эффективный):
+    1. Mobile API публичный (быстро, часто работает)
+    2. Mobile API + cookies (для приватного)
+    3. yt-dlp + cookies (резерв)
+    4. yt-dlp публичный (последний шанс)
     5. InstaSave API (для 18+)
     """
     result = await extract_instagram_shortcode(url)
@@ -558,15 +558,8 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     
     shortcode, is_reel = result
     
-    # ШАГ 1: YT-DLP ПУБЛИЧНЫЙ
-    logger.info(f"🔄 Шаг 1/5: yt-dlp публичный (качество={quality})...")
-    video_path, photos, description = await download_instagram_yt_dlp(url, quality)
-    if video_path or photos:
-        final_description = None if is_reel else description
-        return (video_path, photos, final_description)
-    
-    # ШАГ 2: MOBILE API ПУБЛИЧНЫЙ
-    logger.info(f"🔄 Шаг 2/5: Mobile API публичный (качество={quality})...")
+    # ШАГ 1: MOBILE API ПУБЛИЧНЫЙ (самый надежный)
+    logger.info(f"🔄 Шаг 1/5: Mobile API публичный (качество={quality})...")
     video_path, photos, description, error_code = await download_instagram_mobile_api(shortcode, quality)
     if video_path or photos:
         final_description = None if is_reel else description
@@ -575,9 +568,9 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
     if error_code == '404':
         return None, None, "❌ Контент не найден или удалён"
     
-    # ШАГ 3-4: С COOKIES
+    # ШАГ 2-3: С COOKIES (если публичный не сработал)
     if error_code in ['403', 'other']:
-        logger.info("🔐 Контент защищён, пробуем с cookies...")
+        logger.info("🔐 Контент защищён или требует авторизации...")
         
         cookies_files = []
         if Path("cookies.txt").exists():
@@ -589,7 +582,8 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
         
         if cookies_files:
             for idx, cookies_file in enumerate(cookies_files, 1):
-                logger.info(f"🔄 Шаг 3/5 ({idx}/{len(cookies_files)}): Mobile API + {cookies_file.name} (качество={quality})...")
+                # Шаг 2: Mobile API + cookies
+                logger.info(f"🔄 Шаг 2/5 ({idx}/{len(cookies_files)}): Mobile API + {cookies_file.name}...")
                 cookies_dict = load_cookies_from_file(cookies_file)
                 if cookies_dict:
                     video_path, photos, description, _ = await download_instagram_mobile_api(shortcode, quality, cookies_dict)
@@ -597,14 +591,22 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
                         final_description = None if is_reel else description
                         return (video_path, photos, final_description)
                 
-                logger.info(f"🔄 Шаг 4/5 ({idx}/{len(cookies_files)}): yt-dlp + {cookies_file.name} (качество={quality})...")
+                # Шаг 3: yt-dlp + cookies
+                logger.info(f"🔄 Шаг 3/5 ({idx}/{len(cookies_files)}): yt-dlp + {cookies_file.name}...")
                 video_path, photos, description = await download_instagram_yt_dlp(url, quality, cookies_file)
                 if video_path or photos:
                     final_description = None if is_reel else description
                     return (video_path, photos, final_description)
         
+        # ШАГ 4: YT-DLP ПУБЛИЧНЫЙ (попытка без cookies)
+        logger.info(f"🔄 Шаг 4/5: yt-dlp публичный (качество={quality})...")
+        video_path, photos, description = await download_instagram_yt_dlp(url, quality)
+        if video_path or photos:
+            final_description = None if is_reel else description
+            return (video_path, photos, final_description)
+        
         # ШАГ 5: INSTASAVE API
-        logger.info("🔄 Шаг 5/5: InstaSave API (для 18+)...")
+        logger.info("🔄 Шаг 5/5: InstaSave API...")
         video_path, photos, description = await download_instagram_via_instasave(shortcode)
         if video_path or photos:
             final_description = None if is_reel else description
@@ -614,8 +616,10 @@ async def download_instagram(url: str, quality: str = "best", user_id: Optional[
             "❌ Не удалось скачать контент\n\n"
             "Возможные причины:\n"
             "• Приватный аккаунт\n"
+            "• Cookies устарели или забанены\n"
             "• Контент удалён\n"
-            "• Требуется обновление cookies"
+            "• Rate-limit от Instagram\n\n"
+            "💡 Попробуйте через несколько минут"
         )
     
     return None, None, "❌ Неизвестная ошибка"
