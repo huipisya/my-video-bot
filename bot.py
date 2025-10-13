@@ -868,6 +868,26 @@ async def handle_link(message: types.Message, state: FSMContext):
     
     temp_file = None
     temp_photos = []
+    status_msg_deleted = False
+    
+    async def safe_edit_status(text: str):
+        """Безопасное редактирование статусного сообщения"""
+        nonlocal status_msg_deleted
+        if not status_msg_deleted:
+            try:
+                await status_msg.edit_text(text)
+            except TelegramBadRequest:
+                status_msg_deleted = True
+    
+    async def safe_delete_status():
+        """Безопасное удаление статусного сообщения"""
+        nonlocal status_msg_deleted
+        if not status_msg_deleted:
+            try:
+                await status_msg.delete()
+                status_msg_deleted = True
+            except TelegramBadRequest:
+                status_msg_deleted = True
     
     try:
         # === INSTAGRAM ===
@@ -876,21 +896,21 @@ async def handle_link(message: types.Message, state: FSMContext):
             
             # Ошибка
             if description and "❌" in description:
-                await status_msg.edit_text(description, parse_mode="HTML")
+                await safe_edit_status(description)
                 return
             
             # Успех
             if video_path or photos:
-                await status_msg.edit_text("📤 Отправляю...")
+                await safe_edit_status("📤 Отправляю...")
                 temp_file = video_path
                 temp_photos = photos if photos else []
                 
                 success = await send_instagram_content(message.chat.id, video_path, photos, description)
                 
                 if success:
-                    await status_msg.delete()
+                    await safe_delete_status()
                 else:
-                    await status_msg.edit_text("❌ Ошибка при отправке")
+                    await safe_edit_status("❌ Ошибка при отправке")
                 
                 # Очистка
                 if temp_file:
@@ -900,13 +920,13 @@ async def handle_link(message: types.Message, state: FSMContext):
                 return
             
             # Не удалось скачать
-            await status_msg.edit_text("❌ Не удалось скачать контент")
+            await safe_edit_status("❌ Не удалось скачать контент")
             return
         
         # === TIKTOK ФОТО ===
         elif platform == 'tiktok' and '/photo/' in url.lower():
             photos, description = await download_tiktok_photos(url)
-            await status_msg.delete()
+            await safe_delete_status()
             
             if photos:
                 temp_photos = photos
@@ -927,76 +947,23 @@ async def handle_link(message: types.Message, state: FSMContext):
         temp_file = await download_video(url, user_quality)
         
         if not temp_file or not os.path.exists(temp_file):
-            await status_msg.edit_text("❌ Не удалось скачать видео")
+            await safe_edit_status("❌ Не удалось скачать видео")
             return
         
-        await status_msg.edit_text("📤 Отправляю...")
+        await safe_edit_status("📤 Отправляю...")
         await send_video_or_message(message.chat.id, temp_file)
-        await status_msg.delete()
+        await safe_delete_status()
         cleanup_file(temp_file)
     
-    except Exception as e:  # ← ВОТ ЭТО НУЖНО ДОБАВИТЬ!
+    except Exception as e:
         error_msg = f"❌ Ошибка: {str(e)}"
         logger.error(error_msg)
-        try:
-            await status_msg.edit_text(error_msg)
-        except:
-            pass
+        await safe_edit_status(error_msg)
     finally:
         if temp_file:
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
-            
-            # Не удалось скачать
-            await status_msg.edit_text("❌ Не удалось скачать контент")
-            return
-        
-        # === TIKTOK ФОТО ===
-        elif platform == 'tiktok' and '/photo/' in url.lower():
-            photos, description = await download_tiktok_photos(url)
-            await status_msg.delete()
-            
-            if photos:
-                temp_photos = photos
-                media_group = [
-                    InputMediaPhoto(
-                        media=FSInputFile(photo),
-                        caption=description if i == 0 else None
-                    )
-                    for i, photo in enumerate(photos[:10])
-                ]
-                await bot.send_media_group(chat_id=message.chat.id, media=media_group)
-                cleanup_files(photos)
-            else:
-                await message.answer(description)
-            return
-        
-       # === YOUTUBE ВИДЕО ===
-        elif platform == 'youtube':
-            temp_file = await download_video(url, user_quality, platform="youtube")
-            
-            if not temp_file or not os.path.exists(temp_file):
-                await status_msg.edit_text("❌ Не удалось скачать видео")
-                return
-            
-            await status_msg.edit_text("📤 Отправляю...")
-            await send_video_or_message(message.chat.id, temp_file)
-            await status_msg.delete()
-            cleanup_file(temp_file)
-        
-        # === TIKTOK ВИДЕО ===
-        elif platform == 'tiktok':
-            temp_file = await download_video(url, user_quality)
-            
-            if not temp_file or not os.path.exists(temp_file):
-                await status_msg.edit_text("❌ Не удалось скачать видео")
-                return
-            
-            await status_msg.edit_text("📤 Отправляю...")
-            await send_video_or_message(message.chat.id, temp_file)
-            await status_msg.delete()
-            cleanup_file(temp_file)
 
 # === 🚀 ЗАПУСК ===
 async def main():
