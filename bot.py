@@ -987,7 +987,7 @@ async def handle_link(message: types.Message, state: FSMContext):
         
         # === TIKTOK ВИДЕО ===
         elif platform == 'tiktok':
-            temp_file = await download_video(url, user_quality, platform="tiktok")
+            temp_file = await download_video(url, user_quality)
             
             if not temp_file or not os.path.exists(temp_file):
                 await status_msg.edit_text("❌ Не удалось скачать видео")
