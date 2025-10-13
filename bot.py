@@ -933,7 +933,7 @@ async def handle_link(message: types.Message, state: FSMContext):
         await status_msg.delete()
         cleanup_file(temp_file)
     
-    except Exception as e:
+    except Exception as e:  # ← ВОТ ЭТО НУЖНО ДОБАВИТЬ!
         error_msg = f"❌ Ошибка: {str(e)}"
         logger.error(error_msg)
         try:
@@ -945,6 +945,56 @@ async def handle_link(message: types.Message, state: FSMContext):
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
+            
+            # Не удалось скачать
+            await status_msg.edit_text("❌ Не удалось скачать контент")
+            return
+        
+        # === TIKTOK ФОТО ===
+        elif platform == 'tiktok' and '/photo/' in url.lower():
+            photos, description = await download_tiktok_photos(url)
+            await status_msg.delete()
+            
+            if photos:
+                temp_photos = photos
+                media_group = [
+                    InputMediaPhoto(
+                        media=FSInputFile(photo),
+                        caption=description if i == 0 else None
+                    )
+                    for i, photo in enumerate(photos[:10])
+                ]
+                await bot.send_media_group(chat_id=message.chat.id, media=media_group)
+                cleanup_files(photos)
+            else:
+                await message.answer(description)
+            return
+        
+       # === YOUTUBE ВИДЕО ===
+        elif platform == 'youtube':
+            temp_file = await download_video(url, user_quality, platform="youtube")
+            
+            if not temp_file or not os.path.exists(temp_file):
+                await status_msg.edit_text("❌ Не удалось скачать видео")
+                return
+            
+            await status_msg.edit_text("📤 Отправляю...")
+            await send_video_or_message(message.chat.id, temp_file)
+            await status_msg.delete()
+            cleanup_file(temp_file)
+        
+        # === TIKTOK ВИДЕО ===
+        elif platform == 'tiktok':
+            temp_file = await download_video(url, user_quality, platform="tiktok")
+            
+            if not temp_file or not os.path.exists(temp_file):
+                await status_msg.edit_text("❌ Не удалось скачать видео")
+                return
+            
+            await status_msg.edit_text("📤 Отправляю...")
+            await send_video_or_message(message.chat.id, temp_file)
+            await status_msg.delete()
+            cleanup_file(temp_file)
 
 # === 🚀 ЗАПУСК ===
 async def main():
