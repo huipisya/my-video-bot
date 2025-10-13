@@ -137,7 +137,7 @@ def set_quality_setting(user_id: int, quality: str):
     user_settings[user_id] = quality
     logger.info(f"💾 Качество '{quality}' сохранено для user {user_id}")
 
-def get_ydl_opts(quality: str = "best") -> dict:
+def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> dict: # Добавлен параметр use_youtube_cookies
     opts = {
         'format': QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
         'merge_output_format': 'mp4',
@@ -149,29 +149,19 @@ def get_ydl_opts(quality: str = "best") -> dict:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
     }
-    
-    # YouTube cookies (если есть)
-    if Path("cookies_youtube.txt").exists():
+
+    # YouTube cookies (теперь условно)
+    if use_youtube_cookies and Path("cookies_youtube.txt").exists(): # Проверяем флаг И существование файла
         opts['cookiefile'] = 'cookies_youtube.txt'
-        logger.info("🍪 Используем YouTube cookies")
-    
+        logger.info("🍪 Используем YouTube cookies (если применимо)")
+    elif use_youtube_cookies:
+         logger.debug("🍪 YouTube cookies не найдены или не требуются") # Опционально: лог, если флаг true, но файла нет
+
     # Proxy
     proxy = os.getenv("PROXY_URL")
     if proxy:
         opts['proxy'] = proxy
-    
-    return opts
-    
-    # YouTube cookies (если есть)
-    if Path("cookies_youtube.txt").exists():
-        opts['cookiefile'] = 'cookies_youtube.txt'
-        logger.info("🍪 Используем YouTube cookies")
-    
-    # Proxy
-    proxy = os.getenv("PROXY_URL")
-    if proxy:
-        opts['proxy'] = proxy
-    
+
     return opts
 
 def is_valid_url(url: str) -> bool:
@@ -734,21 +724,24 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     except Exception as e:
         return None, f"❌ Ошибка: {str(e)[:100]}"
 
-async def download_video(url: str, quality: str = "best") -> Optional[str]:
+async def download_video(url: str, quality: str = "best", platform: str = "youtube") -> Optional[str]: # Добавлен параметр platform
     """Скачивание видео (YouTube, TikTok) через yt-dlp"""
     try:
-        logger.info(f"🔄 Скачивание видео (качество={quality})...")
-        ydl_opts = get_ydl_opts(quality)
-        
+        logger.info(f"🔄 Скачивание видео с {platform.upper()} (качество={quality})...")
+
+        # Решаем, использовать ли YouTube cookies. TikTok - нет.
+        use_yt_cookies = (platform.lower() == 'youtube')
+        ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_yt_cookies) # Передаем флаг
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
-            
+
             if temp_file and os.path.exists(temp_file):
                 logger.info(f"✅ Видео скачано: {Path(temp_file).name}")
                 return temp_file
     except Exception as e:
-        logger.error(f"❌ yt-dlp: {e}")
+        logger.error(f"❌ yt-dlp ({platform}): {e}") # Уточняем лог
     return None
 # === 📤 ОТПРАВКА ВИДЕО ===
 async def send_video_or_message(chat_id: int, file_path: str, caption: str = "") -> bool:
@@ -944,7 +937,7 @@ async def handle_link(message: types.Message, state: FSMContext):
             return
         
         # === YOUTUBE / TIKTOK ВИДЕО ===
-        temp_file = await download_video(url, user_quality)
+        temp_file = await download_video(url, user_quality, platform) # Передаем platform
         
         if not temp_file or not os.path.exists(temp_file):
             await safe_edit_status("❌ Не удалось скачать видео")
