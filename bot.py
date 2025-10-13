@@ -734,15 +734,18 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     except Exception as e:
         return None, f"❌ Ошибка: {str(e)[:100]}"
 
-# === 📤 СКАЧИВАНИЕ ВИДЕО (YouTube, TikTok) ===
 async def download_video(url: str, quality: str = "best") -> Optional[str]:
+    """Скачивание видео (YouTube, TikTok) через yt-dlp"""
     try:
-        logger.info("🔄 Скачивание видео через yt-dlp...")
+        logger.info(f"🔄 Скачивание видео (качество={quality})...")
         ydl_opts = get_ydl_opts(quality)
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
+            
             if temp_file and os.path.exists(temp_file):
+                logger.info(f"✅ Видео скачано: {Path(temp_file).name}")
                 return temp_file
     except Exception as e:
         logger.error(f"❌ yt-dlp: {e}")
