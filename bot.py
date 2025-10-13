@@ -18,6 +18,7 @@ from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 import yt_dlp
 import sys
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -76,6 +77,7 @@ def init_cookies_from_env():
 # Инициализируем cookies
 init_cookies_from_env()
 
+
 # === 🔐 ТОКЕН И WEBHOOK ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
@@ -91,6 +93,65 @@ dp = Dispatcher()
 # === 🧠 ХРАНИЛИЩЕ НАСТРОЕК ===
 user_settings = {}
 RATE_LIMIT_DELAY = {}
+
+# --- НОВОЕ ---
+# Переменные для Instagram Playwright
+IG_BROWSER: Optional[Browser] = None
+IG_CONTEXT: Optional[BrowserContext] = None
+IG_PLAYWRIGHT_READY = False
+
+# --- НОВОЕ ---
+# Определение функции init_instagram_playwright
+async def init_instagram_playwright():
+    """
+    Инициализирует браузер и контекст Playwright для Instagram.
+    Загружает cookies из файла (если существует) и применяет их к контексту.
+    """
+    global IG_BROWSER, IG_CONTEXT, IG_PLAYWRIGHT_READY
+    logger.info("🌐 Инициализация Instagram Playwright...")
+
+    try:
+        # Запускаем Playwright
+        pw = await async_playwright().start()
+        IG_BROWSER = await pw.chromium.launch(
+            headless=True, # Установите False, если нужно видеть окно браузера для отладки
+            # args=["--no-sandbox", "--disable-dev-shm-usage"] # Опционально для серверов
+        )
+
+        # Загружаем cookies из файла, если он существует
+        cookies_to_load = []
+        cookie_file_path = Path("cookies_playwright.json") # Имя файла для cookies от Playwright
+        if cookie_file_path.exists():
+            logger.info(f"🍪 Загружаем cookies из {cookie_file_path.name}")
+            try:
+                with open(cookie_file_path, 'r', encoding='utf-8') as f:
+                    cookies_to_load = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"⚠️ Ошибка чтения JSON из {cookie_file_path.name}, пропускаем загрузку cookies.")
+        else:
+            logger.info(f"🍪 Файл {cookie_file_path.name} не найден, запуск без предзагруженных cookies.")
+
+        # Создаём контекст с загруженными cookies
+        IG_CONTEXT = await IG_BROWSER.new_context(
+            # viewport={'width': 1920, 'height': 1080}, # Опционально: размер окна
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        )
+        if cookies_to_load:
+            await IG_CONTEXT.add_cookies(cookies_to_load)
+            logger.info(f"✅ Загружено {len(cookies_to_load)} cookies в контекст Playwright.")
+
+        IG_PLAYWRIGHT_READY = True
+        logger.info("✅ Instagram Playwright инициализирован.")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации Instagram Playwright: {e}")
+        IG_PLAYWRIGHT_READY = False
+        # Опционально: попытаться закрыть браузер, если он был открыт
+        if IG_BROWSER:
+            await IG_BROWSER.close()
+            IG_BROWSER = None
+        if IG_CONTEXT:
+            await IG_CONTEXT.close()
+            IG_CONTEXT = None
 
 # === 🎨 СОСТОЯНИЯ FSM ===
 class VideoStates(StatesGroup):
@@ -961,7 +1022,12 @@ async def handle_link(message: types.Message, state: FSMContext):
 # === 🚀 ЗАПУСК ===
 async def main():
     logger.info("🚀 Запуск бота...")
-    
+
+    # --- НОВОЕ ---
+    # Инициализируем Playwright для Instagram
+    await init_instagram_playwright()
+    # --- /НОВОЕ ---
+
     if WEBHOOK_HOST:
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
         import aiohttp.web
@@ -988,6 +1054,12 @@ async def main():
             logger.info("🛑 Бот остановлен")
             await bot.delete_webhook(drop_pending_updates=True)
             await runner.cleanup()
+            # --- НОВОЕ ---
+            # Закрываем браузер Playwright при завершении
+            if IG_BROWSER:
+                logger.info("🛑 Закрываю браузер Playwright...")
+                await IG_BROWSER.close()
+            # --- /НОВОЕ ---
             await bot.session.close()
     else:
         logger.info("🔄 Запускаю в рэжиме long polling")
@@ -995,4 +1067,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-# === .gitignore ==                      
