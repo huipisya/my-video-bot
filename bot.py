@@ -1104,7 +1104,7 @@ async def main():
             # --- /НОВОЕ ---
             await bot.session.close()
     else:
-        logger.info("🔄 Запускаю в рэжиме long polling")
+        logger.info("🔄 Запускаю в режиме long polling")
         await dp.start_polling(bot, skip_updates=True) 
 if __name__ == "__main__":
     asyncio.run(main())
