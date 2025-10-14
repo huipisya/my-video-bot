@@ -84,6 +84,7 @@ RATE_LIMIT_DELAY = {}
 IG_BROWSER: Optional[Browser] = None
 IG_CONTEXT: Optional[BrowserContext] = None
 IG_PLAYWRIGHT_READY = False
+
 # --- НОВОЕ ---
 # Определение функции init_instagram_playwright
 async def init_instagram_playwright():
