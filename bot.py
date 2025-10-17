@@ -916,19 +916,26 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file', f, filename=Path(file_path).name)
-                # Используем основной URL для загрузки
+                # ИСПРАВЛЕНО: Убраны лишние пробелы и www из URL
                 async with session.post('https://file.io/', data=data) as resp:
                     if resp.status == 200:
-                        response_json = await resp.json()
+                        try:
+                            response_json = await resp.json()
+                        except aiohttp.ContentTypeError:
+                            logger.error(f"❌ file.io: Ответ не в формате JSON: {await resp.text()}")
+                            return None
+
                         if response_json.get('success'):
                             link = response_json.get('link')
                             if link:
                                 logger.info(f"✅ Загружено на file.io: {link}")
                                 return link
+                            else:
+                                logger.error(f"❌ file.io: Ответ JSON не содержит 'link': {response_json}")
                         else:
-                            logger.error(f"❌ file.io: ответ не success. {response_json}")
+                            logger.error(f"❌ file.io: Ответ JSON не 'success'. {response_json}")
                     else:
-                        logger.error(f"❌ file.io: HTTP {resp.status}")
+                        logger.error(f"❌ file.io: HTTP {resp.status}, Текст: {await resp.text()}")
     except Exception as e:
         logger.error(f"❌ file.io: {e}")
     return None
