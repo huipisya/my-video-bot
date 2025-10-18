@@ -812,7 +812,11 @@ async def handle_link(message: Message, state: FSMContext):
             await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             if video_path:
                 temp_file = video_path
-                await send_video_or_message(message.chat.id, temp_file, caption=description)
+                # Проверяем, является ли ссылка Reel
+                is_reel = '/reel/' in url.lower()
+                # Если это Reel, не отправляем описание
+                caption_to_send = "" if is_reel else description
+                await send_video_or_message(message.chat.id, temp_file, caption=caption_to_send)
                 cleanup_file(temp_file)
                 return
             elif photos:
