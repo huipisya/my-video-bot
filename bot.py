@@ -58,7 +58,35 @@ bot: Optional[Bot] = None
 dp = Dispatcher()
 
 user_settings = {} # Словарь для хранения настроек качества для пользователей
+SETTINGS_FILE = 'user_settings.json' # Имя файла для хранения настроек
 RATE_LIMIT_DELAY = {} # Словарь для отслеживания задержки на пользователя (если нужно)
+# - Функция для загрузки настроек пользователей из файла -
+def load_user_settings():
+    global user_settings
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            user_settings = json.load(f)
+            logger.info(f"✅ Загружено {len(user_settings)} настроек пользователей из {SETTINGS_FILE}")
+    except FileNotFoundError:
+        logger.info(f"📁 Файл {SETTINGS_FILE} не найден, создаю новый.")
+        user_settings = {}
+        save_user_settings() # Создаём пустой файл, если его не было
+    except json.JSONDecodeError:
+        logger.error(f"❌ Ошибка чтения JSON из {SETTINGS_FILE}, создаю новый.")
+        user_settings = {}
+        save_user_settings() # Пересоздаём файл, если повреждён
+    except Exception as e:
+        logger.error(f"❌ Неизвестная ошибка при загрузке настроек: {e}")
+        user_settings = {} # На всякий случай, если что-то пошло не так
+
+# - Функция для сохранения настроек пользователей в файл -
+def save_user_settings():
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_settings, f, ensure_ascii=False, indent=2)
+        logger.info(f"✅ Настройки пользователей сохранены в {SETTINGS_FILE}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения настроек в {SETTINGS_FILE}: {e}")
 
 # - Настройка состояний FSM -
 class VideoStates(StatesGroup):
@@ -659,6 +687,7 @@ async def process_quality_choice(message: Message, state: FSMContext):
     }
     if choice in QUALITY_FORMATS:
         user_settings[message.from_user.id] = choice
+        save_user_settings()
         await state.clear()
         # Отправляем сообщение с установленным качеством, используя значение choice (в верхнем регистре)
         # и возвращаем основную клавиатуру
@@ -870,6 +899,7 @@ async def main():
 
     # Инициализация cookies из переменных окружения
     init_cookies_from_env()
+    load_user_settings()
 
     # Инициализация Playwright
     await init_instagram_playwright()
@@ -905,6 +935,7 @@ async def main():
         try:
             await dp.start_polling(bot)
         finally:
+            save_user_settings()
             logger.info("🛑 Бот остановлен (Polling)")
 
     # Закрытие браузеров Playwright при завершении
