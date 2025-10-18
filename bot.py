@@ -866,13 +866,27 @@ async def handle_link(message: Message, state: FSMContext):
                 await message.answer("❌ Не удалось скачать медиа с Instagram.")
                 return
 
-        # Обработка результата для видео (YouTube, TikTok)
+                # Обработка результата для видео (YouTube, TikTok)
         await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         if temp_file:
-            # ИСПРАВЛЕНО: Теперь вызывается обновлённая send_video_or_message
-            is_reel = '/reel/' in url.lower()
-            caption_to_send = "" if is_reel else description
-            await send_video_or_message(message.chat.id, temp_file)
+            # --- ИСПРАВЛЕНО ---
+            # Для YouTube и TikTok видео caption (описание) не отправляется.
+            # Переменная description не определена для YouTube, её использование вызовет ошибку.
+            # Для Instagram Reels caption также не отправляется (is_reel).
+            # Для других Instagram видео caption может быть определён выше.
+            if platform == "youtube":
+                 # Не передаём caption для YouTube
+                await send_video_or_message(message.chat.id, temp_file) # caption не передаётся
+            elif platform == "tiktok":
+                 # Не передаём caption для TikTok видео
+                await send_video_or_message(message.chat.id, temp_file) # caption не передаётся
+            else: # platform == "instagram" (и это видео, а не фото)
+                 # Здесь description должна быть определена выше для Instagram
+                 # Проверяем, является ли это Reel
+                is_reel = '/reel/' in url.lower()
+                caption_to_send = "" if is_reel else description
+                await send_video_or_message(message.chat.id, temp_file, caption=caption_to_send)
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
             cleanup_file(temp_file) # Удаляем файл после отправки
         else:
             await message.answer("❌ Не удалось скачать видео.")
