@@ -870,6 +870,8 @@ async def handle_link(message: Message, state: FSMContext):
         await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         if temp_file:
             # ИСПРАВЛЕНО: Теперь вызывается обновлённая send_video_or_message
+            is_reel = '/reel/' in url.lower()
+            caption_to_send = "" if is_reel else description
             await send_video_or_message(message.chat.id, temp_file)
             cleanup_file(temp_file) # Удаляем файл после отправки
         else:
