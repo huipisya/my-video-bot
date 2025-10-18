@@ -759,13 +759,6 @@ async def process_quality_choice(message: Message, state: FSMContext):
 # --- Обработчик ссылок ---
 @dp.message(F.text)
 async def handle_link(message: Message):
-    # Проверяем, находится ли пользователь в состоянии выбора качества
-    state = await dp.current_state(chat=message.chat.id, user=message.from_user.id)
-    if state == VideoStates.choosing_quality:
-        # Если да, передаем управление обработчику выбора качества
-        # Это позволит избежать конфликта между обработкой ссылок и выбора качества
-        return await process_quality_choice(message, state)
-
     url = message.text.strip()
     user_id = message.from_user.id
     chat_id = message.chat.id
