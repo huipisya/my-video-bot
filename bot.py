@@ -737,14 +737,18 @@ async def settings_menu(message: Message, state: FSMContext):
     )
 
 # --- Обработчик выбора качества ---
-@dp.message(VideoStates.choosing_quality, F.text.lower().in_(list(QUALITY_FORMATS.keys()) + ["◀️ назад"]))
+@dp.message(VideoStates.choosing_quality)
 async def process_quality_choice(message: Message, state: FSMContext):
-    choice = message.text.lower()
-    if choice == "назад":
+    # Получаем текст сообщения и приводим к нижнему регистру
+    choice = message.text.strip().lower()
+
+    # Определяем, является ли выбор "назад"
+    if choice in ["назад", "◀️ назад"]:
         await state.clear()
         await message.answer("⚙️ Настройки закрыты.", reply_markup=main_keyboard())
         return
 
+    # Проверяем, соответствует ли выбор одному из доступных качеств
     if choice in QUALITY_FORMATS:
         user_settings[message.from_user.id] = choice
         await state.clear()
@@ -754,8 +758,17 @@ async def process_quality_choice(message: Message, state: FSMContext):
             parse_mode="HTML"
         )
     else:
-        await message.answer("❌ Некорректный выбор. Пожалуйста, выберите из предложенных вариантов.")
+        # Если выбор некорректен, предлагаем выбрать из списка снова
+        await message.answer("❌ Некорректный выбор. Пожалуйста, выберите из предложенных вариантов:", reply_markup=settings_menu_keyboard())
+        # Не сбрасываем состояние, чтобы пользователь мог повторить попытку
 
+# --- Вспомогательная функция для создания клавиатуры настроек ---
+def settings_menu_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text=q.upper()) for q in QUALITY_FORMATS.keys()],
+        [KeyboardButton(text="◀️ Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 # --- Обработчик ссылок ---
 @dp.message(F.text)
 async def handle_link(message: Message):
