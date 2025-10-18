@@ -737,7 +737,7 @@ async def settings_menu(message: Message, state: FSMContext):
     )
 
 # --- Обработчик выбора качества ---
-@dp.message(VideoStates.choosing_quality, F.text.in_(list(QUALITY_FORMATS.keys()) + ["◀️ Назад"]))
+@dp.message(VideoStates.choosing_quality, F.text.lower().in_(list(QUALITY_FORMATS.keys()) + ["◀️ назад"]))
 async def process_quality_choice(message: Message, state: FSMContext):
     choice = message.text.lower()
     if choice == "назад":
