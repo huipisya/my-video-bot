@@ -205,13 +205,14 @@ def cleanup_file(file_path: str):
     try:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
-            logger.debug(f"🗑️ Удалён файл: {Path(file_path).name}")
+            # Изменяем уровень логирования с debug на info
+            logger.info(f"🗑️ Удалён файл: {Path(file_path).name}")
     except Exception as e:
         logger.warning(f"⚠️ Не удалось удалить {file_path}: {e}")
 
 def cleanup_files(files: List[str]):
     for file_path in files:
-        cleanup_file(file_path)
+        cleanup_file(file_path) # Эта функция теперь логирует на уровне info
 
 async def check_rate_limit(user_id: int):
     now = time.time()
