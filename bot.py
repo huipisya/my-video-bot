@@ -139,9 +139,19 @@ def get_quality_setting(user_id: int) -> str:
 # - Вспомогательная функция для получения опций yt-dlp -
 def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> Dict[str, Any]:
     """Формирует опции для yt_dlp."""
-    # Используем 'best' как формат по умолчанию или переданный, если он не 'best'
-    # yt-dlp сам разберётся с 'best' и 'bestvideo[...]+bestaudio[...]'
-    format_str = quality if quality != 'best' else 'best'
+    
+    # Маппинг качества в правильные форматы для yt-dlp
+    quality_formats = {
+        'best': 'bestvideo+bestaudio/best',
+        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
+        '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+        '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]'
+    }
+    
+    # Получаем формат или используем 'best' по умолчанию
+    format_str = quality_formats.get(quality.lower(), quality_formats['best'])
+    
     ydl_opts = {
         'format': format_str,
         'outtmpl': '%(title)s.%(ext)s',
@@ -151,7 +161,9 @@ def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> Dic
         'ignoreerrors': False,
         'no_warnings': False,
         'quiet': False,
+        'merge_output_format': 'mp4',  # Принудительное слияние в MP4
     }
+    
     # Проверяем, нужно ли использовать файл cookies_youtube.txt
     cookie_file = "cookies_youtube.txt"
     if use_youtube_cookies and os.path.exists(cookie_file):
@@ -159,7 +171,7 @@ def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> Dic
         logger.info("🍪 Используем куки из файла cookies_youtube.txt")
     elif use_youtube_cookies:
         logger.info("🍪 Файл cookies_youtube.txt не найден, yt-dlp запускается без куки.")
-    # Если use_youtube_cookies == False, куки не добавляем
+    
     return ydl_opts
 
 # - Функция для инициализации Playwright для Instagram -
