@@ -95,8 +95,6 @@ class VideoStates(StatesGroup):
 
 def init_cookies_from_env():
     """Создаёт файлы cookies из переменных окружения."""
-    # Словарь соответствия переменной окружения и имени файла
-    # Оставляем только COOKIES_YOUTUBE, так как она используется для YouTube
     cookie_env_to_file = {
         "COOKIES_YOUTUBE": "cookies_youtube.txt",
     }
@@ -105,18 +103,26 @@ def init_cookies_from_env():
         cookies_json = os.getenv(env_var)
         if cookies_json:
             try:
+                # Попробуем распарсить как JSON
                 cookies_data = json.loads(cookies_json)
                 with open(filename, 'w', encoding='utf-8') as f:
-                    # Предполагается, что данные в формате JSON для yt-dlp
                     json.dump(cookies_data, f, ensure_ascii=False, indent=2)
                 logger.info(f"✅ Создан {filename}")
                 created_files.append(filename)
             except json.JSONDecodeError:
-                logger.error(f"❌ Ошибка декодирования JSON для {env_var}")
+                # Если не JSON, сохраняем как текст (возможно, Netscape формат)
+                logger.warning(f"⚠️ {env_var} не в JSON формате, сохраняю как текст")
+                try:
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        f.write(cookies_json)
+                    logger.info(f"✅ Создан {filename} (текстовый формат)")
+                    created_files.append(filename)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка записи текстового файла {filename}: {e}")
             except Exception as e:
                 logger.error(f"❌ Ошибка записи файла {filename}: {e}")
         else:
-            logger.info(f"🍪 Переменная окружения {env_var} не найдена, пропускаю создание {filename}")
+            logger.info(f"🍪 Переменная окружения {env_var} не найдена")
 
     # Создание пустого файла cookies_youtube.txt, если он не был создан из переменной окружения
     # Это изменение также важно, чтобы убедиться, что файл существует, даже если переменная пуста
