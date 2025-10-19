@@ -135,9 +135,12 @@ def get_quality_setting(user_id: int) -> str:
 
 # - Вспомогательная функция для получения опций yt-dlp -
 def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> Dict[str, Any]:
-    cookie_file = "cookies_youtube.txt" if use_youtube_cookies else None
+    """Формирует опции для yt_dlp."""
+    # Используем 'best' как формат по умолчанию или переданный, если он не 'best'
+    # yt-dlp сам разберётся с 'best' и 'bestvideo[...]+bestaudio[...]'
+    format_str = quality if quality != 'best' else 'best'
     ydl_opts = {
-        'format': quality if quality != 'best' else 'best',
+        'format': format_str,
         'outtmpl': '%(title)s.%(ext)s',
         'noplaylist': True,
         'extractaudio': False,
@@ -146,8 +149,14 @@ def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> Dic
         'no_warnings': False,
         'quiet': False,
     }
-    if cookie_file and os.path.exists(cookie_file):
+    # Проверяем, нужно ли использовать файл cookies_youtube.txt
+    cookie_file = "cookies_youtube.txt"
+    if use_youtube_cookies and os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
+        logger.info("🍪 Используем куки из файла cookies_youtube.txt")
+    elif use_youtube_cookies:
+        logger.info("🍪 Файл cookies_youtube.txt не найден, yt-dlp запускается без куки.")
+    # Если use_youtube_cookies == False, куки не добавляем
     return ydl_opts
 
 # - Функция для инициализации Playwright для Instagram -
@@ -292,27 +301,60 @@ def cleanup_files(files: List[str]):
 
 # - Функция для скачивания видео с YouTube -
 async def download_youtube(url: str, quality: str = "best") -> Optional[str]:
+    """
+    Основная функция скачивания с YouTube.
+    Сначала пробует без куки, затем с куки из файла.
+    Если обе неудачны, возвращает None.
+    """
     logger.info(f"🔄 Скачивание видео с YOUTUBE (качество={quality})...")
-    ydl_opts = get_ydl_opts(quality, use_youtube_cookies=True)
+    # 1. Попытка 1: yt-dlp без куки
+    logger.info("🔄 Попытка скачивания через yt-dlp без куки...")
+    ydl_opts_no_cookies = get_ydl_opts(quality, use_youtube_cookies=False)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             if temp_file and os.path.exists(temp_file):
-                logger.info(f"✅ Видео скачано: {Path(temp_file).name}")
+                logger.info(f"✅ Видео скачано через yt-dlp без куки: {Path(temp_file).name}")
                 return temp_file
             else:
-                logger.error("❌ yt-dlp не создал файл")
-                return None
+                logger.error("❌ yt-dlp не создал файл при попытке без куки")
     except yt_dlp.DownloadError as e:
-        logger.error(f"❌ Ошибка yt-dlp: {e}")
-        return None
+        logger.error(f"❌ Ошибка yt-dlp (без куки): {e}")
     except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка при скачивании с YouTube: {e}")
-        return None
+        logger.error(f"❌ Неизвестная ошибка при скачивании с YouTube (без куки): {e}")
 
+    # 2. Попытка 2: yt-dlp с куки из файла (если файл существует)
+    logger.info("🔄 Попытка скачивания через yt-dlp с куки из файла...")
+    ydl_opts_with_cookies = get_ydl_opts(quality, use_youtube_cookies=True)
+    # Проверяем, был ли добавлен cookiefile в опции
+    if ydl_opts_with_cookies.get('cookiefile'):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
+                info = ydl.extract_info(url, download=True)
+                temp_file = ydl.prepare_filename(info)
+                if temp_file and os.path.exists(temp_file):
+                    logger.info(f"✅ Видео скачано через yt-dlp с куки из файла: {Path(temp_file).name}")
+                    return temp_file
+                else:
+                    logger.error("❌ yt-dlp не создал файл при попытке с куки из файла")
+        except yt_dlp.DownloadError as e:
+            logger.error(f"❌ Ошибка yt-dlp (с куки из файла): {e}")
+        except Exception as e:
+            logger.error(f"❌ Неизвестная ошибка при скачивании с YouTube (с куки из файла): {e}")
+    else:
+        logger.info("ℹ️ Файл cookies_youtube.txt не найден, пропускаю попытку с куки.")
+
+    # Если обе попытки неудачны
+    logger.error("❌ Обе попытки скачивания через yt-dlp (без куки и с куки из файла) не удалась.")
+    return None
 # - Функция для скачивания видео с YouTube через Playwright как резервный метод -
 async def download_youtube_with_playwright(url: str, quality: str = "best") -> Optional[str]:
+    """
+    Резервный метод скачивания через Playwright.
+    Использует Playwright для получения страницы, обхода проверок и извлечения куки.
+    Затем передаёт эти куки в yt-dlp.
+    """
     global YT_CONTEXT
     if not YT_PLAYWRIGHT_READY or not YT_CONTEXT:
         logger.error("❌ YouTube Playwright не инициализирован")
@@ -325,43 +367,50 @@ async def download_youtube_with_playwright(url: str, quality: str = "best") -> O
         page = await YT_CONTEXT.new_page()
         await page.goto(url, wait_until='networkidle')
 
-        # Проверка на страницу входа или ошибку
+        # Проверка на страницу согласия или входа (упрощённо)
         if "consent.youtube.com" in page.url or page.url == "https://www.youtube.com/":
             logger.warning("⚠️ Требуется аутентификация или согласие на куки на YouTube (Playwright).")
-            # Попытка принять куки, если возможно
             try:
+                # Пример поиска кнопки согласия, может потребоваться уточнение селектора
                 accept_button = page.get_by_text("I agree", exact=True).or_(page.get_by_text("Принять", exact=True))
                 if await accept_button.count() > 0:
                     await accept_button.click()
                     await page.wait_for_load_state('networkidle')
+                    logger.info("✅ Кнопка согласия на куки нажата (Playwright).")
             except Exception as e:
-                logger.info(f"ℹ️ Кнопка согласия не найдена или ошибка: {e}")
+                logger.info(f"ℹ️ Кнопка согласия не найдена или ошибка при нажатии: {e}")
 
-        # Получение cookies из Playwright и сохранение во временный файл для yt-dlp
+        # Извлечение куки из браузера Playwright
         cookies = await YT_CONTEXT.cookies()
         if not cookies:
             logger.warning("⚠️ Не удалось получить cookies из Playwright для yt-dlp.")
-            # Всё равно пробуем скачать без куки
+            # Всё равно пробуем скачать через yt-dlp, но без куки
             ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
         else:
-            # Сохраняем cookies во временный файл в формате Netscape
+            # Сохраняем куки из Playwright во временный файл в формате Netscape
             temp_cookies_file = Path(tempfile.mktemp(suffix='.txt'))
             with open(temp_cookies_file, 'w', encoding='utf-8') as f:
                 f.write("# Netscape HTTP Cookie File\n")
-                f.write("# This is a generated file! Do not edit.\n\n")
+                f.write("# This is a generated file! Do not edit.\n")
                 for cookie in cookies:
-                    f.write(f"{cookie['domain']}\t")
-                    f.write(f"{'TRUE' if cookie['domain'].startswith('.') else 'FALSE'}\t")
-                    f.write(f"{cookie['path']}\t")
-                    f.write(f"{'TRUE' if cookie['secure'] else 'FALSE'}\t")
-                    f.write(f"{int(cookie['expires']) if cookie['expires'] else 0}\t")
-                    f.write(f"{cookie['name']}\t")
-                    f.write(f"{cookie['value']}\n")
+                    # Формат Netscape: domain flag path secure expiration name value
+                    domain = cookie['domain']
+                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                    path = cookie['path']
+                    secure = 'TRUE' if cookie['secure'] else 'FALSE'
+                    # Обработка expires: может быть None или -1 для сессионных куки
+                    expires = int(cookie['expires']) if cookie.get('expires') and cookie['expires'] > 0 else 0
+                    name = cookie['name']
+                    value = cookie['value']
+                    f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
 
-            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False) # Уже используем куки из Playwright
+            logger.info(f"✅ Создан временный файл куки из Playwright: {temp_cookies_file.name}")
+            # Используем временный файл куки в yt-dlp
+            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False) # Не используем файл куки по умолчанию
             ydl_opts['cookiefile'] = str(temp_cookies_file)
             logger.info("🔄 Повторная попытка скачивания через yt-dlp с куки из Playwright...")
 
+        # Выполняем yt-dlp с куки из Playwright (или без, если куки не удалось получить)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
@@ -380,7 +429,7 @@ async def download_youtube_with_playwright(url: str, quality: str = "best") -> O
             await page.close()
         if temp_cookies_file and temp_cookies_file.exists():
             temp_cookies_file.unlink(missing_ok=True) # Удаляем временный файл куки
-
+            logger.info(f"🗑️ Удалён временный файл куки: {temp_cookies_file.name}")
 # - Функция для скачивания видео с TikTok -
 async def download_tiktok(url: str, quality: str = "1080p") -> Optional[str]:
     logger.info(f"🔄 Скачивание видео с TIKTOK (качество={quality})...")
