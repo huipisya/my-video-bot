@@ -994,7 +994,7 @@ async def main():
         await runner.setup()
         site = aiohttp.web.TCPSite(runner, '0.0.0.0', PORT) # Порт для вебхука
         await site.start()
-        logger.info("🚀 Вебхук запущен на порту 8080")
+        logger.info(f"✅ Webhook запущен на порту {PORT}")
         # Ожидание завершения (обычно через сигнал)
         await asyncio.Event().wait()
     else:
