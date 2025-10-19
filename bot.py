@@ -92,17 +92,13 @@ def save_user_settings():
 class VideoStates(StatesGroup):
     choosing_quality = State()
 
-# - Функция для инициализации cookies из переменных окружения -
 def init_cookies_from_env():
     """Создаёт файлы cookies из переменных окружения."""
     # Словарь соответствия переменной окружения и имени файла
+    # Оставляем только COOKIES_YOUTUBE, так как она используется для YouTube
     cookie_env_to_file = {
-        "COOKIES_BOT1": "cookies_bot1",
-        "COOKIES_BOT2": "cookies_bot2",
-        "COOKIES_BOT3": "cookies_bot3",
         "COOKIES_YOUTUBE": "cookies_youtube.txt",
     }
-
     created_files = []
     for env_var, filename in cookie_env_to_file.items():
         cookies_json = os.getenv(env_var)
@@ -122,13 +118,13 @@ def init_cookies_from_env():
             logger.info(f"🍪 Переменная окружения {env_var} не найдена, пропускаю создание {filename}")
 
     # Создание пустого файла cookies_youtube.txt, если он не был создан из переменной окружения
+    # Это изменение также важно, чтобы убедиться, что файл существует, даже если переменная пуста
     if "cookies_youtube.txt" not in created_files:
         if not os.path.exists("cookies_youtube.txt"):
             Path("cookies_youtube.txt").touch()
             logger.info("✅ Создан пустой файл cookies_youtube.txt")
 
     logger.info(f"✅ Создано {len(created_files)} файлов cookies")
-
 # - Функция для получения настроек качества пользователя -
 def get_quality_setting(user_id: int) -> str:
     return user_settings.get(user_id, "best") # По умолчанию "best"
