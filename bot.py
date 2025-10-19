@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # - Глобальные переменные -
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") # Опционально, если используется webhook
+PORT = int(os.getenv("PORT", 8000))
 
 YT_BROWSER: Optional[Browser] = None
 YT_CONTEXT: Optional[BrowserContext] = None
@@ -968,24 +969,30 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN, session=AiohttpSession())
 
-    WEBHOOK_PATH = "/"
+    WEBHOOK_PATH = "/webhook"
     WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
-
     if WEBHOOK_URL:
         # - Режим Webhook -
+        WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
         logger.info(f"📡 Работаю в режиме Webhook: {WEBHOOK_URL}")
+        await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_webhook(WEBHOOK_URL)
         app = aiohttp.web.Application()
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
         webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+        async def health(request):
+            return aiohttp.web.Response(text="OK")
+        app.router.add_get("/", health)
+        app.router.add_get("/health", health)
 
-        # Установка диспетчера для вебхука
-        await dp.start_polling(bot) # Это может быть не нужно для вебхука, см. документацию aiogram
+        
+
+       
 
         runner = aiohttp.web.AppRunner(app)
         await runner.setup()
-        site = aiohttp.web.TCPSite(runner, '0.0.0.0', 8080) # Порт для вебхука
+        site = aiohttp.web.TCPSite(runner, '0.0.0.0', PORT) # Порт для вебхука
         await site.start()
         logger.info("🚀 Вебхук запущен на порту 8080")
         # Ожидание завершения (обычно через сигнал)
@@ -993,6 +1000,7 @@ async def main():
     else:
         # - Режим Polling -
         logger.info("🔄 Работаю в режиме Polling")
+        await bot.delete_webhook(drop_pending_updates=True)
         try:
             await dp.start_polling(bot)
         finally:
