@@ -791,13 +791,9 @@ def main_keyboard() -> ReplyKeyboardMarkup:
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     welcome_text = (
-        f"🎬 <b>Добро пожаловать в VideoBot!</b>\n"
-        f"Я могу скачать видео с:\n"
-        f"• YouTube\n"
-        f"• TikTok\n"
-        f"• Instagram (посты, reels, карусели)\n\n"
-        f"📲 Просто отправь мне ссылку!\n"
-        f"⚙️ Текущее качество: <b>{get_quality_setting(user_id).upper()}</b>"
+        "Кидайте ссылку — пришлю файл.\n"
+        
+        "Можно выбрать качество или оформить PRO."
     )
     await message.answer(welcome_text, reply_markup=main_keyboard(), parse_mode="HTML")
 
