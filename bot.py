@@ -1,9 +1,11 @@
-# bot.py
+# bot.py - Luno Bot
 import asyncio
 import json
 import logging
 import os
 import tempfile
+import hashlib
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -21,31 +23,27 @@ from aiogram.types import (
     InputMediaPhoto,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
     CallbackQuery,
-    FSInputFile
 )
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Browser, BrowserContext
 import sys
 
-# Настройка кодировки stdout (важно для Windows и некоторых других сред)
 sys.stdout.reconfigure(encoding='utf-8')
-
-# Загрузка переменных окружения из .env файла
 load_dotenv()
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,  # Уровень логирования, можно изменить на DEBUG для более подробного вывода
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# - Глобальные переменные -
+# Глобальные переменные
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") # Опционально, если используется webhook
+BOT_USERNAME = os.getenv("BOT_USERNAME", "VideoDL_All_bot")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
 PORT = int(os.getenv("PORT", 8000))
+ADMIN_USERNAME = "@somersbyewich"
 
 YT_BROWSER: Optional[Browser] = None
 YT_CONTEXT: Optional[BrowserContext] = None
@@ -58,147 +56,245 @@ IG_PLAYWRIGHT_READY = False
 bot: Optional[Bot] = None
 dp = Dispatcher()
 
-user_settings = {} # Словарь для хранения настроек качества для пользователей
-SETTINGS_FILE = 'user_settings.json' # Имя файла для хранения настроек
-RATE_LIMIT_DELAY = {} # Словарь для отслеживания задержки на пользователя (если нужно)
-# - Функция для загрузки настроек пользователей из файла -
+# Файлы для хранения данных
+SETTINGS_FILE = 'user_settings.json'
+USERS_FILE = 'users_data.json'
+REFERRALS_FILE = 'referrals.json'
+
+user_settings = {}
+users_data = {}  # {user_id: {premium: bool, premium_until: timestamp, downloads_today: int, last_download_date: str, referral_code: str, referred_by: user_id}}
+referrals = {}  # {referral_code: user_id}
+
+# Константы
+FREE_DAILY_LIMIT = 5
+PREMIUM_QUALITY_OPTIONS = ['best', '1080p']
+
+# FSM состояния
+class VideoStates(StatesGroup):
+    choosing_quality = State()
+
+# ==================== РАБОТА С ДАННЫМИ ====================
+
 def load_user_settings():
     global user_settings
     try:
         with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
             user_settings = json.load(f)
-            logger.info(f"✅ Загружено {len(user_settings)} настроек пользователей из {SETTINGS_FILE}")
+            # Конвертируем ключи обратно в int
+            user_settings = {int(k): v for k, v in user_settings.items()}
+            logger.info(f"Загружено {len(user_settings)} настроек пользователей")
     except FileNotFoundError:
-        logger.info(f"📁 Файл {SETTINGS_FILE} не найден, создаю новый.")
         user_settings = {}
-        save_user_settings() # Создаём пустой файл, если его не было
-    except json.JSONDecodeError:
-        logger.error(f"❌ Ошибка чтения JSON из {SETTINGS_FILE}, создаю новый.")
-        user_settings = {}
-        save_user_settings() # Пересоздаём файл, если повреждён
+        save_user_settings()
     except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка при загрузке настроек: {e}")
-        user_settings = {} # На всякий случай, если что-то пошло не так
+        logger.error(f"Ошибка загрузки настроек: {e}")
+        user_settings = {}
 
-# - Функция для сохранения настроек пользователей в файл -
 def save_user_settings():
     try:
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(user_settings, f, ensure_ascii=False, indent=2)
-        logger.info(f"✅ Настройки пользователей сохранены в {SETTINGS_FILE}")
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения настроек в {SETTINGS_FILE}: {e}")
+        logger.error(f"Ошибка сохранения настроек: {e}")
 
-# - Настройка состояний FSM -
-class VideoStates(StatesGroup):
-    choosing_quality = State()
+def load_users_data():
+    global users_data
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            users_data = json.load(f)
+            users_data = {int(k): v for k, v in users_data.items()}
+            logger.info(f"Загружено {len(users_data)} пользователей")
+    except FileNotFoundError:
+        users_data = {}
+        save_users_data()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки данных пользователей: {e}")
+        users_data = {}
+
+def save_users_data():
+    try:
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(users_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения данных пользователей: {e}")
+
+def load_referrals():
+    global referrals
+    try:
+        with open(REFERRALS_FILE, 'r', encoding='utf-8') as f:
+            referrals = json.load(f)
+            logger.info(f"Загружено {len(referrals)} реферальных кодов")
+    except FileNotFoundError:
+        referrals = {}
+        save_referrals()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки реферальных кодов: {e}")
+        referrals = {}
+
+def save_referrals():
+    try:
+        with open(REFERRALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(referrals, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения реферальных кодов: {e}")
+
+def generate_referral_code(user_id: int) -> str:
+    """Генерирует уникальный реферальный код для пользователя"""
+    return hashlib.md5(f"{user_id}{datetime.now()}".encode()).hexdigest()[:8]
+
+def get_or_create_user(user_id: int) -> dict:
+    """Получает или создает данные пользователя"""
+    if user_id not in users_data:
+        referral_code = generate_referral_code(user_id)
+        users_data[user_id] = {
+            'premium': False,
+            'premium_until': None,
+            'downloads_today': 0,
+            'last_download_date': None,
+            'referral_code': referral_code,
+            'referred_by': None,
+            'referrals_completed': []
+        }
+        referrals[referral_code] = user_id
+        save_users_data()
+        save_referrals()
+    return users_data[user_id]
+
+def is_premium(user_id: int) -> bool:
+    """Проверяет, является ли пользователь премиум"""
+    user = get_or_create_user(user_id)
+    if user['premium'] and user['premium_until']:
+        if datetime.fromisoformat(user['premium_until']) > datetime.now():
+            return True
+        else:
+            user['premium'] = False
+            save_users_data()
+    return False
+
+def check_daily_limit(user_id: int) -> bool:
+    """Проверяет дневной лимит загрузок. Возвращает True если можно загружать"""
+    if is_premium(user_id):
+        return True
+    
+    user = get_or_create_user(user_id)
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    if user['last_download_date'] != today:
+        user['downloads_today'] = 0
+        user['last_download_date'] = today
+    
+    if user['downloads_today'] >= FREE_DAILY_LIMIT:
+        return False
+    
+    return True
+
+def increment_downloads(user_id: int):
+    """Увеличивает счетчик загрузок"""
+    user = get_or_create_user(user_id)
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    if user['last_download_date'] != today:
+        user['downloads_today'] = 1
+        user['last_download_date'] = today
+    else:
+        user['downloads_today'] += 1
+    
+    save_users_data()
+
+def activate_premium(user_id: int, days: int = 365):
+    """Активирует премиум для пользователя"""
+    user = get_or_create_user(user_id)
+    user['premium'] = True
+    user['premium_until'] = (datetime.now() + timedelta(days=days)).isoformat()
+    save_users_data()
+
+def get_quality_setting(user_id: int) -> str:
+    """Получает настройку качества пользователя"""
+    return user_settings.get(user_id, "720p")
+
+# ==================== COOKIES ====================
 
 def init_cookies_from_env():
-    """Создаёт файлы cookies из переменных окружения."""
+    """Создаёт файлы cookies из переменных окружения"""
     cookie_env_to_file = {
         "COOKIES_YOUTUBE": "cookies_youtube.txt",
         "COOKIES_BOT1": "cookies_instagram_bot1.txt",
         "COOKIES_BOT2": "cookies_instagram_bot2.txt",
         "COOKIES_BOT3": "cookies_instagram_bot3.txt",
     }
-    created_files = []
+    
     for env_var, filename in cookie_env_to_file.items():
         cookies_json = os.getenv(env_var)
         if cookies_json:
             try:
-                # Попробуем распарсить как JSON
                 cookies_data = json.loads(cookies_json)
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(cookies_data, f, ensure_ascii=False, indent=2)
-                logger.info(f"✅ Создан {filename}")
-                created_files.append(filename)
+                logger.info(f"Создан {filename}")
             except json.JSONDecodeError:
-                # Если не JSON, сохраняем как текст (возможно, Netscape формат)
-                logger.warning(f"⚠️ {env_var} не в JSON формате, сохраняю как текст")
                 try:
                     with open(filename, 'w', encoding='utf-8') as f:
                         f.write(cookies_json)
-                    logger.info(f"✅ Создан {filename} (текстовый формат)")
-                    created_files.append(filename)
+                    logger.info(f"Создан {filename} (текстовый формат)")
                 except Exception as e:
-                    logger.error(f"❌ Ошибка записи текстового файла {filename}: {e}")
+                    logger.error(f"Ошибка записи {filename}: {e}")
             except Exception as e:
-                logger.error(f"❌ Ошибка записи файла {filename}: {e}")
-        else:
-            logger.info(f"🍪 Переменная окружения {env_var} не найдена")
+                logger.error(f"Ошибка записи {filename}: {e}")
 
-    # Создание пустого файла cookies_youtube.txt, если он не был создан из переменной окружения
-    if "cookies_youtube.txt" not in created_files:
-        if not os.path.exists("cookies_youtube.txt"):
-            Path("cookies_youtube.txt").touch()
-            logger.info("✅ Создан пустой файл cookies_youtube.txt")
+    if not os.path.exists("cookies_youtube.txt"):
+        Path("cookies_youtube.txt").touch()
+        logger.info("Создан пустой файл cookies_youtube.txt")
 
-    logger.info(f"✅ Создано {len(created_files)} файлов cookies")
-# - Функция для получения настроек качества пользователя -
-def get_quality_setting(user_id: int) -> str:
-    return user_settings.get(user_id, "best") # По умолчанию "best"
+# ==================== YT-DLP ====================
 
-# - Вспомогательная функция для получения опций yt-dlp -
-def get_ydl_opts(quality: str = "best", use_youtube_cookies: bool = True) -> Dict[str, Any]:
-    """Формирует опции для yt_dlp."""
-    
-    # Маппинг качества в правильные форматы для yt-dlp
+def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dict[str, Any]:
+    """Формирует опции для yt_dlp"""
     quality_formats = {
         'best': 'bestvideo+bestaudio/best',
         '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
         '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
         '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-        '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]'
+        'audio': 'bestaudio/best',
     }
     
-    # Получаем формат или используем 'best' по умолчанию
-    format_str = quality_formats.get(quality.lower(), quality_formats['best'])
+    format_str = quality_formats.get(quality.lower(), quality_formats['720p'])
     
     ydl_opts = {
         'format': format_str,
         'outtmpl': '%(title)s.%(ext)s',
         'noplaylist': True,
-        'extractaudio': False,
+        'extractaudio': quality.lower() == 'audio',
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'no_warnings': False,
         'quiet': False,
-        'merge_output_format': 'mp4',  # Принудительное слияние в MP4
+        'merge_output_format': 'mp4' if quality.lower() != 'audio' else 'mp3',
     }
     
-    # Проверяем, нужно ли использовать файл cookies_youtube.txt
     cookie_file = "cookies_youtube.txt"
     if use_youtube_cookies and os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
-        logger.info("🍪 Используем куки из файла cookies_youtube.txt")
-    elif use_youtube_cookies:
-        logger.info("🍪 Файл cookies_youtube.txt не найден, yt-dlp запускается без куки.")
     
     return ydl_opts
 
-# - Функция для инициализации Playwright для Instagram -
+# ==================== PLAYWRIGHT ====================
+
 async def init_instagram_playwright():
     global IG_BROWSER, IG_CONTEXT, IG_PLAYWRIGHT_READY
-    logger.info("🌐 Инициализация Instagram Playwright...")
+    logger.info("Инициализация Instagram Playwright...")
     try:
         pw = await async_playwright().start()
         IG_BROWSER = await pw.chromium.launch(headless=True)
         IG_CONTEXT = await IG_BROWSER.new_context(
-            # viewport={'width': 1920, 'height': 1080}, # Опционально
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
 
-        # Попытка загрузить cookies для Instagram из переменной окружения
         cookies_json = os.getenv("COOKIES_INSTAGRAM") or os.getenv("COOKIES_TXT")
         if cookies_json:
             try:
                 cookies_data = json.loads(cookies_json)
-                # yt-dlp формат cookies -> Playwright формат cookies
                 cookies_to_load = []
                 for cookie in cookies_data:
-                    # Преобразование формата, если нужно
-                    # yt-dlp использует {'name', 'value', 'domain', 'path', 'expires', 'secure', 'httpOnly'}
-                    # Playwright ожидает {'name', 'value', 'domain', 'path', 'expires', 'secure', 'httpOnly', 'sameSite'}
                     pw_cookie = {
                         'name': cookie.get('name', ''),
                         'value': cookie.get('value', ''),
@@ -207,253 +303,183 @@ async def init_instagram_playwright():
                         'expires': int(cookie.get('expires', 0)) if cookie.get('expires') else None,
                         'secure': bool(cookie.get('secure', False)),
                         'httpOnly': bool(cookie.get('httpOnly', False)),
-                        'sameSite': 'Lax' # или 'Strict', 'None' в зависимости от требований
+                        'sameSite': 'Lax'
                     }
-                    # Убираем None значения
                     pw_cookie = {k: v for k, v in pw_cookie.items() if v is not None}
                     cookies_to_load.append(pw_cookie)
 
                 await IG_CONTEXT.add_cookies(cookies_to_load)
-                logger.info(f"✅ Загружено {len(cookies_to_load)} Instagram cookies в контекст Playwright.")
-            except json.JSONDecodeError:
-                logger.error("❌ Ошибка декодирования JSON для COOKIES_INSTAGRAM/COOKIES_TXT")
+                logger.info(f"Загружено {len(cookies_to_load)} Instagram cookies")
             except Exception as e:
-                logger.error(f"❌ Ошибка загрузки cookies в контекст Playwright: {e}")
-        else:
-            logger.info("🍪 Переменная окружения COOKIES_INSTAGRAM/COOKIES_TXT не найдена для Playwright, запуск без cookies.")
+                logger.error(f"Ошибка загрузки Instagram cookies: {e}")
 
         IG_PLAYWRIGHT_READY = True
-        logger.info("✅ Instagram Playwright инициализирован.")
+        logger.info("Instagram Playwright инициализирован")
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации Instagram Playwright: {e}")
+        logger.error(f"Ошибка инициализации Instagram Playwright: {e}")
         IG_PLAYWRIGHT_READY = False
-        if IG_BROWSER:
-            await IG_BROWSER.close()
-        IG_BROWSER = None
-        if IG_CONTEXT:
-            await IG_CONTEXT.close()
-        IG_CONTEXT = None
 
-# - Функция для инициализации Playwright для YouTube -
 async def init_youtube_playwright():
     global YT_BROWSER, YT_CONTEXT, YT_PLAYWRIGHT_READY
-    logger.info("🌐 Инициализация YouTube Playwright...")
+    logger.info("Инициализация YouTube Playwright...")
     try:
         pw = await async_playwright().start()
         YT_BROWSER = await pw.chromium.launch(headless=True)
         YT_CONTEXT = await YT_BROWSER.new_context(
-            # viewport={'width': 1920, 'height': 1080}, # Опционально
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
 
-        # Загрузка cookies из файла
         cookie_file_path = Path("cookies_youtube.txt")
         if cookie_file_path.exists():
-            logger.info(f"🍪 Загружаем YouTube cookies из {cookie_file_path.name}")
+            logger.info(f"Загружаем YouTube cookies из {cookie_file_path.name}")
             try:
                 with open(cookie_file_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
                 cookies_to_load = []
                 for line in lines:
-                    # Пропускаем комментарии и пустые строки
                     if line.startswith('#') or not line.strip():
                         continue
                     try:
                         parts = line.strip().split('\t')
                         if len(parts) >= 7:
-                            # Преобразование формата Netscape cookie в формат Playwright
                             domain, flag, path, secure, expiration, name, value = parts[:7]
                             pw_cookie = {
                                 'name': name,
                                 'value': value,
-                                'domain': domain.lstrip('.'), # Убираем начальную точку, если есть
+                                'domain': domain.lstrip('.'),
                                 'path': path,
                                 'expires': int(expiration) if expiration.isdigit() else None,
                                 'secure': secure.lower() == 'true',
-                                'httpOnly': False, # yt-dlp не всегда указывает это
-                                'sameSite': 'Lax' # или 'Strict', 'None' в зависимости от требований
+                                'httpOnly': False,
+                                'sameSite': 'Lax'
                             }
-                            # Убираем None значения
                             pw_cookie = {k: v for k, v in pw_cookie.items() if v is not None}
                             cookies_to_load.append(pw_cookie)
                     except ValueError:
-                        logger.warning(f"⚠️ Неверный формат строки cookie: {line.strip()}")
                         continue
 
                 if cookies_to_load:
                     await YT_CONTEXT.add_cookies(cookies_to_load)
-                    logger.info(f"✅ Загружено {len(cookies_to_load)} YouTube cookies в контекст Playwright.")
-                else:
-                    logger.info("🍪 Файл cookies_youtube.txt найден, но не содержит действительных cookies для Playwright.")
+                    logger.info(f"Загружено {len(cookies_to_load)} YouTube cookies")
             except Exception as e:
-                logger.error(f"❌ Ошибка загрузки cookies из файла: {e}")
-        else:
-            logger.info("🍪 Файл cookies_youtube.txt не найден, запуск без cookies.")
+                logger.error(f"Ошибка загрузки cookies: {e}")
 
         YT_PLAYWRIGHT_READY = True
-        logger.info("✅ YouTube Playwright инициализирован.")
+        logger.info("YouTube Playwright инициализирован")
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации YouTube Playwright: {e}")
+        logger.error(f"Ошибка инициализации YouTube Playwright: {e}")
         YT_PLAYWRIGHT_READY = False
-        if YT_BROWSER:
-            await YT_BROWSER.close()
-        YT_BROWSER = None
-        if YT_CONTEXT:
-            await YT_CONTEXT.close()
-        YT_CONTEXT = None
 
-# - Функция для очистки файлов -
+# ==================== СКАЧИВАНИЕ ====================
+
 def cleanup_file(file_path: str):
     try:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
-            # Изменяем уровень логирования с debug на info
-            logger.info(f"🗑️ Удалён файл: {Path(file_path).name}")
+            logger.info(f"Удалён файл: {Path(file_path).name}")
     except Exception as e:
-        logger.warning(f"⚠️ Не удалось удалить {file_path}: {e}")
+        logger.warning(f"Не удалось удалить {file_path}: {e}")
 
 def cleanup_files(files: List[str]):
     for file_path in files:
         cleanup_file(file_path)
 
-# - Функция для скачивания видео с YouTube -
-async def download_youtube(url: str, quality: str = "best") -> Optional[str]:
-    """
-    Основная функция скачивания с YouTube.
-    Сначала пробует без куки, затем с куки из файла.
-    Если обе неудачны, возвращает None.
-    """
-    logger.info(f"🔄 Скачивание видео с YOUTUBE (качество={quality})...")
-    # 1. Попытка 1: yt-dlp без куки
-    logger.info("🔄 Попытка скачивания через yt-dlp без куки...")
+async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
+    """Скачивание с YouTube"""
+    logger.info(f"Скачивание с YouTube (качество={quality})...")
+    
+    # Попытка без cookies
     ydl_opts_no_cookies = get_ydl_opts(quality, use_youtube_cookies=False)
     try:
         with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             if temp_file and os.path.exists(temp_file):
-                logger.info(f"✅ Видео скачано через yt-dlp без куки: {Path(temp_file).name}")
+                logger.info(f"Видео скачано через yt-dlp без куки")
                 return temp_file
-            else:
-                logger.error("❌ yt-dlp не создал файл при попытке без куки")
-    except yt_dlp.DownloadError as e:
-        logger.error(f"❌ Ошибка yt-dlp (без куки): {e}")
     except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка при скачивании с YouTube (без куки): {e}")
+        logger.error(f"Ошибка yt-dlp (без куки): {e}")
 
-    # 2. Попытка 2: yt-dlp с куки из файла (если файл существует)
-    logger.info("🔄 Попытка скачивания через yt-dlp с куки из файла...")
+    # Попытка с cookies
     ydl_opts_with_cookies = get_ydl_opts(quality, use_youtube_cookies=True)
-    # Проверяем, был ли добавлен cookiefile в опции
     if ydl_opts_with_cookies.get('cookiefile'):
         try:
             with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
                 info = ydl.extract_info(url, download=True)
                 temp_file = ydl.prepare_filename(info)
                 if temp_file and os.path.exists(temp_file):
-                    logger.info(f"✅ Видео скачано через yt-dlp с куки из файла: {Path(temp_file).name}")
+                    logger.info(f"Видео скачано через yt-dlp с куки")
                     return temp_file
-                else:
-                    logger.error("❌ yt-dlp не создал файл при попытке с куки из файла")
-        except yt_dlp.DownloadError as e:
-            logger.error(f"❌ Ошибка yt-dlp (с куки из файла): {e}")
         except Exception as e:
-            logger.error(f"❌ Неизвестная ошибка при скачивании с YouTube (с куки из файла): {e}")
-    else:
-        logger.info("ℹ️ Файл cookies_youtube.txt не найден, пропускаю попытку с куки.")
+            logger.error(f"Ошибка yt-dlp (с куки): {e}")
 
-    # Если обе попытки неудачны
-    logger.error("❌ Обе попытки скачивания через yt-dlp (без куки и с куки из файла) не удалась.")
+    logger.error("Обе попытки скачивания не удались")
     return None
-# - Функция для скачивания видео с YouTube через Playwright как резервный метод -
-async def download_youtube_with_playwright(url: str, quality: str = "best") -> Optional[str]:
-    """
-    Резервный метод скачивания через Playwright.
-    Использует Playwright для получения страницы, обхода проверок и извлечения куки.
-    Затем передаёт эти куки в yt-dlp.
-    """
+
+async def download_youtube_with_playwright(url: str, quality: str = "720p") -> Optional[str]:
+    """Резервный метод через Playwright"""
     global YT_CONTEXT
     if not YT_PLAYWRIGHT_READY or not YT_CONTEXT:
-        logger.error("❌ YouTube Playwright не инициализирован")
         return None
 
-    logger.info(f"🔄 Скачивание видео с YOUTUBE через Playwright (качество={quality})...")
+    logger.info(f"Скачивание через Playwright (качество={quality})...")
     page = None
     temp_cookies_file = None
     try:
         page = await YT_CONTEXT.new_page()
         await page.goto(url, wait_until='networkidle')
 
-        # Проверка на страницу согласия или входа (упрощённо)
-        if "consent.youtube.com" in page.url or page.url == "https://www.youtube.com/":
-            logger.warning("⚠️ Требуется аутентификация или согласие на куки на YouTube (Playwright).")
+        if "consent.youtube.com" in page.url:
             try:
-                # Пример поиска кнопки согласия, может потребоваться уточнение селектора
-                accept_button = page.get_by_text("I agree", exact=True).or_(page.get_by_text("Принять", exact=True))
+                accept_button = page.get_by_text("I agree", exact=True)
                 if await accept_button.count() > 0:
                     await accept_button.click()
                     await page.wait_for_load_state('networkidle')
-                    logger.info("✅ Кнопка согласия на куки нажата (Playwright).")
-            except Exception as e:
-                logger.info(f"ℹ️ Кнопка согласия не найдена или ошибка при нажатии: {e}")
+            except Exception:
+                pass
 
-        # Извлечение куки из браузера Playwright
         cookies = await YT_CONTEXT.cookies()
-        if not cookies:
-            logger.warning("⚠️ Не удалось получить cookies из Playwright для yt-dlp.")
-            # Всё равно пробуем скачать через yt-dlp, но без куки
-            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
-        else:
-            # Сохраняем куки из Playwright во временный файл в формате Netscape
+        if cookies:
             temp_cookies_file = Path(tempfile.mktemp(suffix='.txt'))
             with open(temp_cookies_file, 'w', encoding='utf-8') as f:
                 f.write("# Netscape HTTP Cookie File\n")
-                f.write("# This is a generated file! Do not edit.\n")
                 for cookie in cookies:
-                    # Формат Netscape: domain flag path secure expiration name value
                     domain = cookie['domain']
                     flag = 'TRUE' if domain.startswith('.') else 'FALSE'
                     path = cookie['path']
                     secure = 'TRUE' if cookie['secure'] else 'FALSE'
-                    # Обработка expires: может быть None или -1 для сессионных куки
                     expires = int(cookie['expires']) if cookie.get('expires') and cookie['expires'] > 0 else 0
                     name = cookie['name']
                     value = cookie['value']
                     f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
 
-            logger.info(f"✅ Создан временный файл куки из Playwright: {temp_cookies_file.name}")
-            # Используем временный файл куки в yt-dlp
-            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False) # Не используем файл куки по умолчанию
+            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
             ydl_opts['cookiefile'] = str(temp_cookies_file)
-            logger.info("🔄 Повторная попытка скачивания через yt-dlp с куки из Playwright...")
+        else:
+            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
 
-        # Выполняем yt-dlp с куки из Playwright (или без, если куки не удалось получить)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             if temp_file and os.path.exists(temp_file):
-                logger.info(f"✅ Видео скачано через yt-dlp с куки из Playwright: {Path(temp_file).name}")
+                logger.info(f"Видео скачано через Playwright")
                 return temp_file
-            else:
-                logger.error("❌ yt-dlp не создал файл после использования куки из Playwright")
-                return None
 
     except Exception as e:
-        logger.error(f"❌ Ошибка в download_youtube_with_playwright: {e}")
-        return None
+        logger.error(f"Ошибка в Playwright: {e}")
     finally:
         if page:
             await page.close()
         if temp_cookies_file and temp_cookies_file.exists():
-            temp_cookies_file.unlink(missing_ok=True) # Удаляем временный файл куки
-            logger.info(f"🗑️ Удалён временный файл куки: {temp_cookies_file.name}")
-# - Функция для скачивания видео с TikTok -
-async def download_tiktok(url: str, quality: str = "1080p") -> Optional[str]:
-    logger.info(f"🔄 Скачивание видео с TIKTOK (качество={quality})...")
-    # yt-dlp сам определяет качество для TikTok, но мы можем попробовать указать формат
-    # Однако, для TikTok часто работает просто 'best'
+            temp_cookies_file.unlink(missing_ok=True)
+    
+    return None
+
+async def download_tiktok(url: str, quality: str = "720p") -> Optional[str]:
+    """Скачивание с TikTok"""
+    logger.info(f"Скачивание с TikTok...")
     ydl_opts = {
-        'format': 'best', # yt-dlp обычно сам находит лучшее качество для TikTok
+        'format': 'best',
         'outtmpl': '%(title)s.%(ext)s',
         'noplaylist': True,
         'extractaudio': False,
@@ -468,149 +494,111 @@ async def download_tiktok(url: str, quality: str = "1080p") -> Optional[str]:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             if temp_file and os.path.exists(temp_file):
-                logger.info(f"✅ Видео TikTok скачано: {Path(temp_file).name}")
+                logger.info(f"Видео TikTok скачано")
                 return temp_file
-            else:
-                logger.error("❌ yt-dlp не создал файл для TikTok")
-                return None
-    except yt_dlp.DownloadError as e:
-        error_str = str(e).lower()
-        if "Sign in to confirm you're not a bot" in error_str or "requires authentication" in error_str:
-            logger.info("🔄 Ошибка требует аутентификации, пробуем Playwright...")
-            # Здесь можно реализовать логику с Playwright для TikTok, если необходимо
-            # Пока возвращаем None
-            pass
-        logger.error(f"❌ Ошибка скачивания с TikTok: {e}")
-        return None
     except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка при скачивании с TikTok: {e}")
-        return None
+        logger.error(f"Ошибка скачивания TikTok: {e}")
+    
+    return None
 
-# - Функция для скачивания фото с TikTok (карусель) -
 async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
-    logger.info(f"🔄 Скачивание фото с TIKTOK (карусель)...")
+    """Скачивание фото с TikTok"""
+    logger.info(f"Скачивание фото с TikTok...")
     ydl_opts = {
         'format': 'best',
         'outtmpl': '%(id)s/%(autonumber)s.%(ext)s',
-        'noplaylist': False, # Позволяем скачивать плейлисты (фото как плейлист)
+        'noplaylist': False,
         'extractaudio': False,
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'no_warnings': True,
         'quiet': True,
-        'playlistend': 10, # Ограничиваем количество скачиваемых фото
+        'playlistend': 10,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            temp_dir = info.get('id') # Используем ID TikTok в качестве имени папки
+            temp_dir = info.get('id')
             if temp_dir and os.path.isdir(temp_dir):
-                # Собираем все файлы из папки
-                photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+                photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
+                             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
                 if photo_files:
                     description = info.get('description', '') or info.get('title', '')
-                    logger.info(f"✅ Скачано {len(photo_files)} фото из TikTok карусели.")
+                    logger.info(f"Скачано {len(photo_files)} фото из TikTok")
                     return photo_files, description
-                else:
-                    logger.error("❌ Не найдено файлов изображений в папке TikTok.")
-                    return None, ""
-            else:
-                logger.error("❌ Папка для фото TikTok не найдена.")
-                return None, ""
-    except yt_dlp.DownloadError as e:
-        logger.error(f"❌ Ошибка скачивания фото с TikTok: {e}")
-        return None, ""
     except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка при скачивании фото с TikTok: {e}")
-        return None, ""
+        logger.error(f"Ошибка скачивания фото TikTok: {e}")
+    
+    return None, ""
 
-# - Функция для скачивания с Instagram -
 async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-    logger.info(f"🔄 Скачивание медиа с INSTAGRAM...")
-    ydl_opts = get_ydl_opts(quality="best", use_youtube_cookies=False) # Куки для YouTube, но yt-dlp сам разберётся
-    # Попробуем сначала через yt-dlp
+    """Скачивание с Instagram"""
+    logger.info(f"Скачивание с Instagram...")
+    ydl_opts = get_ydl_opts(quality="best", use_youtube_cookies=False)
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             if temp_file and os.path.exists(temp_file):
-                logger.info(f"✅ Медиа Instagram скачано через yt-dlp: {Path(temp_file).name}")
+                logger.info(f"Медиа Instagram скачано")
                 description = info.get('description', '') or info.get('title', '')
-                return temp_file, None, description # Видео, нет фото, описание
+                return temp_file, None, description
             else:
-                # Если не видео, возможно, это фото или карусель
-                # yt-dlp может сохранить в папку
-                temp_dir = info.get('id') # Используем ID как имя папки
+                temp_dir = info.get('id')
                 if temp_dir and os.path.isdir(temp_dir):
-                    photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+                    photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
+                                 if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
                     if photo_files:
-                        logger.info(f"✅ Скачано {len(photo_files)} фото из Instagram.")
+                        logger.info(f"Скачано {len(photo_files)} фото из Instagram")
                         description = info.get('description', '') or info.get('title', '')
-                        return None, photo_files, description # Нет видео, фото, описание
-                logger.error("❌ yt-dlp не создал файл или папку для Instagram.")
-                return None, None, "❌ Не удалось получить медиа через yt-dlp."
-    except yt_dlp.DownloadError as e:
-        error_str = str(e).lower()
-        logger.info(f"🔄 yt-dlp не удалось: {e}. Пробуем Playwright...")
-        if "login" in error_str or "private" in error_str or "requires authentication" in error_str:
-            logger.info("🔐 yt-dlp требует аутентификации, пробуем Playwright...")
-            # В любом случае, пробуем Playwright
-            return await download_instagram_with_playwright(url)
+                        return None, photo_files, description
     except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка при скачивании с Instagram (yt-dlp): {e}")
-        # Если yt-dlp не сработал, пробуем Playwright
+        logger.info(f"yt-dlp не удалось, пробуем Playwright: {e}")
         return await download_instagram_with_playwright(url)
 
-# - Функция для скачивания с Instagram через Playwright -
+    return None, None, ""
+
 async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+    """Скачивание с Instagram через Playwright"""
     global IG_CONTEXT
     if not IG_PLAYWRIGHT_READY or not IG_CONTEXT:
-        logger.error("❌ Instagram Playwright не инициализирован")
-        return None, None, "❌ Playwright не инициализирован"
+        return None, None, ""
 
-    logger.info(f"🔄 Скачивание медиа с INSTAGRAM через Playwright...")
+    logger.info(f"Скачивание с Instagram через Playwright...")
     page = None
     try:
         page = await IG_CONTEXT.new_page()
         await page.goto(url, wait_until='networkidle')
 
-        # Проверка на страницу входа или ошибку
         if "accounts/login" in page.url or "challenge" in page.url:
-            logger.warning("⚠️ Требуется аутентификация на Instagram (Playwright).")
-            return None, None, "🔐 Требуется аутентификация. Куки могут быть недействительны."
+            logger.warning("Требуется аутентификация на Instagram")
+            return None, None, ""
 
-        # Попытка получить описание (опционально)
-        description_element = page.locator('article div[data-testid="tweet"] div[dir="auto"] span, article div._ab1k._ab1l div._aa99._aamp span')
+        description_element = page.locator('article div._ab1k._ab1l div._aa99._aamp span')
         description = await description_element.first.text_content() if await description_element.count() > 0 else ""
 
-        # Проверка на видео
         video_element = page.locator('article video source')
         if await video_element.count() > 0:
             video_url = await video_element.first.get_attribute('src')
             if video_url:
-                # Скачиваем видео через yt-dlp
                 ydl_opts = {
                     'format': 'best',
                     'outtmpl': '%(title)s.%(ext)s',
                     'noplaylist': True,
                     'extractaudio': False,
                     'nocheckcertificate': True,
-                    'ignoreerrors': False,
-                    'no_warnings': False,
-                    'quiet': False,
                 }
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(video_url, download=True)
                         temp_file = ydl.prepare_filename(info)
                         if temp_file and os.path.exists(temp_file):
-                            logger.info(f"✅ Видео Instagram (через Playwright) скачано: {Path(temp_file).name}")
                             return temp_file, None, description
                 except Exception as e:
-                    logger.error(f"❌ Ошибка скачивания видео из URL: {e}")
+                    logger.error(f"Ошибка скачивания видео: {e}")
 
-        # Проверка на фото (одиночное или карусель)
         photo_elements = page.locator('article img')
         photo_count = await photo_elements.count()
         if photo_count > 0:
@@ -620,7 +608,6 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
                 if photo_url:
                     photo_urls.append(photo_url)
 
-            # Скачиваем фото
             if photo_urls:
                 temp_dir = tempfile.mkdtemp()
                 photo_paths = []
@@ -633,25 +620,24 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
                                     f.write(await resp.read())
                                 photo_paths.append(photo_path)
                 if photo_paths:
-                    logger.info(f"✅ Скачано {len(photo_paths)} фото из Instagram (через Playwright).")
                     return None, photo_paths, description
 
-        logger.error("❌ Не удалось найти видео или фото на странице Instagram (Playwright).")
-        return None, None, "❌ Медиа не найдено."
     except Exception as e:
-        logger.error(f"❌ Ошибка в download_instagram_with_playwright: {e}")
-        return None, None, f"❌ Ошибка Playwright: {e}"
+        logger.error(f"Ошибка в Playwright Instagram: {e}")
     finally:
         if page:
             await page.close()
+    
+    return None, None, ""
 
-# - Функция для загрузки файла на file.io -
 async def upload_to_fileio(file_path: str) -> Optional[str]:
+    """Загрузка на file.io"""
     url = 'https://file.io/'
-    max_size = 50 * 1024 * 1024 # 50 MB в байтах
+    max_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
+    
     if file_size > max_size:
-        logger.info(f"📁 Файл {Path(file_path).name} превышает 50 MB, загружаю на file.io...")
+        logger.info(f"Файл превышает 50 MB, загружаю на file.io...")
         try:
             async with aiohttp.ClientSession() as session:
                 with open(file_path, 'rb') as f:
@@ -662,195 +648,423 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
                             response_json = await resp.json()
                             if response_json.get('success'):
                                 fileio_link = response_json.get('link')
-                                logger.info(f"✅ Файл загружен на file.io: {fileio_link}")
+                                logger.info(f"Файл загружен на file.io")
                                 return fileio_link
-                            else:
-                                logger.error(f"❌ file.io вернул ошибку: {response_json.get('message')}")
-                                return None
-                        else:
-                            logger.error(f"❌ Ошибка загрузки на file.io: статус {resp.status}")
-                            return None
         except Exception as e:
-            logger.error(f"❌ Исключение при загрузке на file.io: {e}")
-            return None
-    else:
-        logger.info(f"📁 Файл {Path(file_path).name} меньше 50 MB, отправляю напрямую.")
-        return None # Файл не нужно загружать на file.io
+            logger.error(f"Ошибка загрузки на file.io: {e}")
+    
+    return None
 
-# - Функция для отправки видео или фото -
 async def send_video_or_message(chat_id: int, file_path: str, caption: str = ""):
-    max_telegram_file_size = 50 * 1024 * 1024 # 50 MB в байтах
+    """Отправка видео или файла"""
+    max_telegram_file_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
+    
     if file_size > max_telegram_file_size:
-        # Загружаем на file.io
         fileio_link = await upload_to_fileio(file_path)
         if fileio_link:
-            await bot.send_message(chat_id, f"📁 Файл слишком большой для Telegram. Вот ссылка: {fileio_link}")
+            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {fileio_link}")
         else:
-            await bot.send_message(chat_id, "❌ Не удалось загрузить файл на file.io для отправки.")
+            await bot.send_message(chat_id, "Не удалось загрузить файл.")
     else:
-        # Отправляем напрямую
         input_file = FSInputFile(file_path)
         try:
-            # Попробуем отправить как видео
             await bot.send_video(chat_id=chat_id, video=input_file, caption=caption)
-            logger.info("✅ Видео отправлено напрямую.")
         except TelegramBadRequest as e:
-            if "Wrong type of the web page content" in str(e) or "PHOTO_AS_DOCUMENT" in str(e):
+            if "Wrong type of the web page content" in str(e):
                 try:
-                    # Если не получилось как видео, пробуем как фото
                     await bot.send_photo(chat_id=chat_id, photo=input_file, caption=caption)
-                    logger.info("✅ Фото отправлено напрямую.")
-                except TelegramBadRequest as e2:
-                    logger.error(f"❌ Ошибка отправки фото: {e2}")
-                    # Если и фото не получилось, возможно, это документ
+                except TelegramBadRequest:
                     await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
-                    logger.info("✅ Файл отправлен как документ.")
             else:
-                logger.error(f"❌ Ошибка отправки видео: {e}")
-                await bot.send_message(chat_id, f"❌ Ошибка при отправке файла: {e}")
-        except Exception as e:
-            logger.error(f"❌ Неизвестная ошибка при отправке файла: {e}")
-            await bot.send_message(chat_id, f"❌ Неизвестная ошибка при отправке файла: {e}")
+                await bot.send_message(chat_id, f"Ошибка при отправке файла.")
 
-# --- Вспомогательная функция для создания клавиатуры настроек ---
-def settings_menu_keyboard() -> ReplyKeyboardMarkup:
-    QUALITY_FORMATS = {
-        "best": "best",
-        "1080p": "1080p",
-        "720p": "720p",
-        "480p": "480p",
-        "360p": "360p"
-    }
-    keyboard = [
-        [KeyboardButton(text=q.upper()) for q in QUALITY_FORMATS.keys()],
-        [KeyboardButton(text="◀️ Назад")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+# ==================== КЛАВИАТУРЫ ====================
 
-# --- Обработчик выбора качества ---
-@dp.message(VideoStates.choosing_quality)
-async def process_quality_choice(message: Message, state: FSMContext):
-    # Получаем текст сообщения и приводим к нижнему регистру
-    choice = message.text.strip().lower()
-
-    # Определяем, является ли выбор "назад", проверяем оба варианта
-    if choice in ["назад", "◀️ назад"]:
-        await state.clear()
-        await message.answer("⚙️ Настройки закрыты.", reply_markup=main_keyboard())
-        return
-
-    # Проверяем, соответствует ли выбор одному из доступных качеств (с учётом регистра)
-    # QUALITY_FORMATS.keys() = ["best", "1080p", "720p", "480p", "360p"]
-    # Пользователь мог ввести "BEST", "1080P", "720p" и т.д.
-    # После .lower() это станет "best", "1080p", "720p"
-    QUALITY_FORMATS = {
-        "best": "best",
-        "1080p": "1080p",
-        "720p": "720p",
-        "480p": "480p",
-        "360p": "360p"
-    }
-    if choice in QUALITY_FORMATS:
-        user_settings[message.from_user.id] = choice
-        save_user_settings()
-        await state.clear()
-        # Отправляем сообщение с установленным качеством, используя значение choice (в верхнем регистре)
-        # и возвращаем основную клавиатуру
-        await message.answer(
-            f"✅ Качество установлено на <b>{choice.upper()}</b>.",
-            reply_markup=main_keyboard(),
-            parse_mode="HTML"
-        )
-        # Состояние уже очищено, можно выйти
-        return
-    else:
-        # Если выбор некорректен, отправляем сообщение об ошибке
-        # и *не сбрасываем* состояние, чтобы пользователь мог снова выбрать
-        await message.answer("❌ Некорректный выбор. Пожалуйста, выберите из предложенных вариантов.")
-        # Опционально: повторно отправить клавиатуру настроек
-        current = get_quality_setting(message.from_user.id)
-        # Используем обновлённую функцию для клавиатуры
-        keyboard = settings_menu_keyboard() # Вызов функции
-        await message.answer(
-            f"⚙️ Текущее качество: <b>{current.upper()}</b>\nВыберите новое:",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        # Не вызываем state.clear(), чтобы пользователь оставался в состоянии выбора
-        # Не сбрасываем состояние, чтобы пользователь мог повторить попытку
-
-# - Функция для создания основной клавиатуры -
 def main_keyboard() -> ReplyKeyboardMarkup:
+    """Главное меню"""
     keyboard = [
-        [KeyboardButton(text="🎬 Инструкция")],
-        [KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="Выбрать качество")],
+        [KeyboardButton(text="Help")],
+        [KeyboardButton(text="Расширить возможности")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-# - Обработчик команды /start -
+def quality_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура выбора качества"""
+    is_premium_user = is_premium(user_id)
+    
+    buttons = [
+        [InlineKeyboardButton(text="Максимальное качество без сжатия Telegram", 
+                             callback_data="quality_best")],
+        [InlineKeyboardButton(text="1080p (Премиум)", 
+                             callback_data="quality_1080p")],
+        [InlineKeyboardButton(text="720p", 
+                             callback_data="quality_720p")],
+        [InlineKeyboardButton(text="480p", 
+                             callback_data="quality_480p")],
+        [InlineKeyboardButton(text="Только аудио", 
+                             callback_data="quality_audio")],
+        [InlineKeyboardButton(text="Отмена", 
+                             callback_data="quality_cancel")],
+    ]
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def premium_required_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для премиум-функций"""
+    buttons = [
+        [InlineKeyboardButton(text="Пригласить друга", 
+                             callback_data="invite_friend")],
+        [InlineKeyboardButton(text="Назад", 
+                             callback_data="back_to_menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def referral_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура реферальной системы"""
+    user = get_or_create_user(user_id)
+    referral_link = f"https://t.me/{BOT_USERNAME}?start={user['referral_code']}"
+    
+    buttons = [
+        [InlineKeyboardButton(text="Скопировать ссылку",
+                            url=referral_link)],
+        [InlineKeyboardButton(text="Проверить приглашение",
+                            callback_data="check_referral")],
+        [InlineKeyboardButton(text="Как это работает",
+                            callback_data="how_referral_works")],
+        [InlineKeyboardButton(text="Назад",
+                            callback_data="back_to_menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def back_to_menu_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка назад в меню"""
+    buttons = [[InlineKeyboardButton(text="Вернуться в главное меню", 
+                                     callback_data="back_to_menu")]]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def limit_reached_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура при достижении лимита"""
+    buttons = [
+        [InlineKeyboardButton(text="Пригласить друга", 
+                             callback_data="invite_friend")],
+        [InlineKeyboardButton(text="Написать фидбэк админу", 
+                             url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def conditions_keyboard(is_premium_user: bool) -> InlineKeyboardMarkup:
+    """Клавиатура условий использования"""
+    if is_premium_user:
+        buttons = [
+            [InlineKeyboardButton(text="Поделиться ботом", 
+                                 callback_data="share_bot")],
+            [InlineKeyboardButton(text="Дать обратную связь", 
+                                 url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
+            [InlineKeyboardButton(text="Назад", 
+                                 callback_data="back_to_menu")],
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(text="Получить бесплатно", 
+                                 callback_data="invite_friend")],
+            [InlineKeyboardButton(text="Проверить приглашение", 
+                                 callback_data="check_referral")],
+            [InlineKeyboardButton(text="Как это работает?", 
+                                 callback_data="how_referral_works")],
+            [InlineKeyboardButton(text="Назад в меню", 
+                                 callback_data="back_to_menu")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    """Обработчик /start"""
     user_id = message.from_user.id
+    get_or_create_user(user_id)
+    
+    # Проверка реферального кода
+    args = message.text.split()
+    if len(args) > 1:
+        referral_code = args[1]
+        if referral_code in referrals:
+            referrer_id = referrals[referral_code]
+            if referrer_id != user_id:  # Нельзя приглашать самого себя
+                user = users_data[user_id]
+                if not user['referred_by']:  # Если еще не использовал реферальный код
+                    user['referred_by'] = referrer_id
+                    save_users_data()
+                    logger.info(f"Пользователь {user_id} зарегистрирован по реферальной ссылке {referrer_id}")
+    
     welcome_text = (
-        "Кидайте ссылку — пришлю файл.\n"
-        
+        "Кидайте ссылку — пришлю файл.\n\n"
         "Можно выбрать качество или оформить PRO."
     )
-    await message.answer(welcome_text, reply_markup=main_keyboard(), parse_mode="HTML")
+    await message.answer(welcome_text, reply_markup=main_keyboard())
 
-# - Обработчик команды /help -
-@dp.message(F.text == "🎬 Инструкция")
-async def send_welcome(message: Message):
+@dp.message(F.text == "Help")
+async def cmd_help(message: Message):
+    """Обработчик Help"""
     help_text = (
-        "🎬 <b>Инструкция по использованию VideoBot</b>\n"
-        "1. Отправьте боту ссылку на видео с YouTube, TikTok или Instagram.\n"
-        "2. Бот скачает и отправит вам видео (или фото, если это карусель)."
+        "<b>Как пользоваться:</b>\n\n"
+        "1. Отправьте ссылку на видео.\n"
+        "2. Если нужно — выберите качество.\n"
+        "3. Получите файл.\n\n"
+        "Поддерживаются YouTube, Instagram, TikTok, X (Twitter), Vimeo и другие.\n\n"
+        "Приватные, удалённые и защищённые видео не скачиваются.\n\n"
+        "<b>По умолчанию:</b>\n"
+        "• 5 загрузок в сутки\n"
+        "• Без максимального качества\n\n"
+        "Разблокируйте всё на год бесплатно — пригласите друга в бота."
     )
-    await message.answer(help_text, reply_markup=main_keyboard(), parse_mode="HTML")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назад в меню", callback_data="back_to_menu")],
+        [InlineKeyboardButton(text="Пригласить друга", callback_data="invite_friend")],
+        [InlineKeyboardButton(text="Условия", callback_data="conditions")],
+    ])
+    
+    await message.answer(help_text, reply_markup=keyboard, parse_mode="HTML")
 
-# - Обработчик команды /settings -
-@dp.message(F.text == "⚙️ Настройки")
-async def settings_menu(message: Message, state: FSMContext):
-    current = get_quality_setting(message.from_user.id)
-    keyboard = settings_menu_keyboard()
+@dp.message(F.text == "Выбрать качество")
+async def cmd_choose_quality(message: Message):
+    """Обработчик выбора качества"""
+    user_id = message.from_user.id
+    current = get_quality_setting(user_id)
+    
     await message.answer(
-        f"⚙️ Текущее качество: <b>{current.upper()}</b>\nВыберите новое:",
-        reply_markup=keyboard,
+        "Выберите качество загрузки:",
+        reply_markup=quality_keyboard(user_id)
+    )
+
+@dp.message(F.text == "Расширить возможности")
+async def cmd_expand(message: Message):
+    """Обработчик расширения возможностей"""
+    user_id = message.from_user.id
+    is_premium_user = is_premium(user_id)
+    
+    if is_premium_user:
+        user = users_data[user_id]
+        premium_until = datetime.fromisoformat(user['premium_until']).strftime('%d.%m.%Y')
+        
+        text = (
+            f"<b>У вас активен Премиум до {premium_until}.</b>\n\n"
+            "Доступны:\n"
+            "• Максимальное качество\n"
+            "• Плейлисты и батчи\n"
+            "• История загрузок\n"
+            "• Приоритетная очередь"
+        )
+        
+        keyboard = conditions_keyboard(True)
+    else:
+        text = (
+            "<b>По умолчанию — 5 загрузок в сутки и без максимума качества.</b>\n\n"
+            "Разблокируйте всё на 1 год бесплатно — пригласите друга по вашей ссылке.\n\n"
+            "Через год это будет стоить 50 ₽/год.\n\n"
+            "Сейчас — бесплатно. На год. Просто, блядь, бесплатно."
+        )
+        
+        keyboard = conditions_keyboard(False)
+    
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+# ==================== ОБРАБОТЧИКИ CALLBACK ====================
+
+@dp.callback_query(F.data.startswith("quality_"))
+async def process_quality_callback(callback: CallbackQuery):
+    """Обработка выбора качества"""
+    user_id = callback.from_user.id
+    quality = callback.data.replace("quality_", "")
+    
+    if quality == "cancel":
+        await callback.message.edit_text("Отменено.")
+        await callback.answer()
+        return
+    
+    is_premium_user = is_premium(user_id)
+    
+    # Проверка премиум-качества
+    if quality in PREMIUM_QUALITY_OPTIONS and not is_premium_user:
+        text = (
+            "Максимальное качество доступно только в Премиуме.\n\n"
+            "Пригласите друга — получите год бесплатно."
+        )
+        await callback.message.edit_text(text, reply_markup=premium_required_keyboard())
+        await callback.answer("Требуется премиум", show_alert=True)
+        return
+    
+    # Сохраняем выбранное качество
+    user_settings[user_id] = quality
+    save_user_settings()
+    
+    quality_names = {
+        'best': 'Максимальное качество',
+        '1080p': '1080p',
+        '720p': '720p',
+        '480p': '480p',
+        'audio': 'Только аудио'
+    }
+    
+    quality_name = quality_names.get(quality, quality)
+    
+    await callback.message.edit_text(
+        f"Установлено качество <b>{quality_name}</b>.",
         parse_mode="HTML"
     )
-    # Устанавливаем состояние FSM
-    await state.set_state(VideoStates.choosing_quality)
+    await callback.answer()
 
-# - Обработчик всех остальных сообщений (предположительно ссылок) -
+@dp.callback_query(F.data == "invite_friend")
+async def process_invite_friend(callback: CallbackQuery):
+    """Обработка приглашения друга"""
+    user_id = callback.from_user.id
+    user = get_or_create_user(user_id)
+    
+    bot_username = (await bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start={user['referral_code']}"
+    
+    text = (
+        f"Чтобы пригласить друга, отправьте ему эту реферальную ссылку:\n\n"
+        f"<code>{referral_link}</code>\n\n"
+        "Когда друг скачает первое видео, вы получите режим Премиум на 1 год."
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Скопировать ссылку", url=referral_link)],
+        [InlineKeyboardButton(text="Проверить приглашение", callback_data="check_referral")],
+        [InlineKeyboardButton(text="Как это работает", callback_data="how_referral_works")],
+        [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")],
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "check_referral")
+async def process_check_referral(callback: CallbackQuery):
+    """Проверка реферального приглашения"""
+    user_id = callback.from_user.id
+    user = get_or_create_user(user_id)
+    
+    # Проверяем, есть ли успешные рефералы
+    completed_referrals = user.get('referrals_completed', [])
+    
+    if completed_referrals:
+        text = (
+            "Друг выполнил условия ✅\n\n"
+            "Вы можете пользоваться тарифом «Премиум»."
+        )
+        keyboard = back_to_menu_keyboard()
+    else:
+        text = (
+            "Друг пока не выполнил условия ❌\n\n"
+            "<b>Мы всё сделали, но ничего не работает</b>\n\n"
+            f"Пришлите админу телеграм тег друга и доказательства, что друг выполнил все условия.\n\n"
+            "Мы всё проверим и выдадим подписку вручную.\n\n"
+            f"Контакт админа: {ADMIN_USERNAME}"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Написать админу", 
+                                 url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
+            [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")],
+        ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "how_referral_works")
+async def process_how_referral_works(callback: CallbackQuery):
+    """Как работает реферальная система"""
+    text = (
+        "<b>Как это работает:</b>\n\n"
+        "— Пригласите друга по вашей ссылке.\n"
+        "— Он должен запустить бота и загрузить любое видео.\n"
+        "— После этого у вас активируется PRO на 365 дней.\n\n"
+        "Друг тоже получит год бесплатно, если пригласит ещё одного друга.\n\n"
+        "Через год подписка будет стоить 50 ₽/месяц."
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Скопировать ссылку", callback_data="invite_friend")],
+        [InlineKeyboardButton(text="Вернуться в главное меню", callback_data="back_to_menu")],
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "conditions")
+async def process_conditions(callback: CallbackQuery):
+    """Условия использования"""
+    user_id = callback.from_user.id
+    is_premium_user = is_premium(user_id)
+    
+    if is_premium_user:
+        user = users_data[user_id]
+        premium_until = datetime.fromisoformat(user['premium_until']).strftime('%d.%m.%Y')
+        
+        text = (
+            f"<b>У вас активен Премиум до {premium_until}.</b>\n\n"
+            "Доступны:\n"
+            "• Максимальное качество\n"
+            "• Плейлисты и батчи\n"
+            "• История загрузок\n"
+            "• Приоритетная очередь"
+        )
+    else:
+        text = (
+            "<b>По умолчанию — 5 загрузок в сутки и без максимума качества.</b>\n\n"
+            "Разблокируйте всё на 1 год бесплатно — пригласите друга по вашей ссылке.\n\n"
+            "Через год это будет стоить 50 ₽/год.\n\n"
+            "Сейчас — бесплатно. На год. Просто, блядь, бесплатно."
+        )
+    
+    keyboard = conditions_keyboard(is_premium_user)
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_menu")
+async def process_back_to_menu(callback: CallbackQuery):
+    """Возврат в главное меню"""
+    await callback.message.delete()
+    welcome_text = (
+        "Кидайте ссылку — пришлю файл.\n\n"
+        "Можно выбрать качество или оформить PRO."
+    )
+    await callback.message.answer(welcome_text, reply_markup=main_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "share_bot")
+async def process_share_bot(callback: CallbackQuery):
+    """Поделиться ботом"""
+    bot_username = (await bot.get_me()).username
+    share_text = f"Попробуй этого бота для скачивания видео: https://t.me/{bot_username}"
+    
+    await callback.answer(f"Поделитесь этой ссылкой: {share_text}", show_alert=True)
+
+# ==================== ОБРАБОТЧИК ССЫЛОК ====================
+
 @dp.message(F.text)
-async def handle_link(message: Message, state: FSMContext):
-    # Проверяем, не находится ли пользователь в состоянии выбора качества
-    current_state = await state.get_state()
-    if current_state == VideoStates.choosing_quality.state:
-        # Если пользователь в состоянии выбора качества, но сюда попал,
-        # это означает, что process_quality_choice не сработал.
-        # Это может быть из-за синтаксической ошибки или другой проблемы.
-        # Логика внутри process_quality_choice должна покрывать все случаи.
-        # Если сюда всё же дойдёт, бот просто скажет, что ожидает ссылку.
-        # Но с правильной логикой в process_quality_choice, этого не должно произойти.
-        # Однако, для надёжности, можно снова показать меню настроек.
-        # await message.answer("❌ Некорректный выбор. Пожалуйста, выберите из предложенных вариантов.")
-        # await settings_menu(message, state) # Повторный вызов меню
-        # return
-        # Лучше оставить как есть, так как process_quality_choice должен обработать всё.
-        return # Выход, если FSM активна, но обработчик не сработал - это проблема в логике FSM.
-
+async def handle_link(message: Message):
+    """Обработчик ссылок на видео"""
     url = message.text.strip()
     user_id = message.from_user.id
     chat_id = message.chat.id
-    quality = get_quality_setting(user_id)
-
+    
     # Проверка на ссылку
     if not (url.startswith("http://") or url.startswith("https://")):
-        await message.answer("🔗 Пожалуйста, отправьте действительную ссылку.")
         return
-
+    
+    # Проверка лимита
+    if not check_daily_limit(user_id):
+        text = (
+            "Лимит 5 загрузок в сутки исчерпан.\n\n"
+            "Разблокируйте безлимит на год бесплатно: пригласите друга."
+        )
+        await message.answer(text, reply_markup=limit_reached_keyboard())
+        return
+    
     # Определение платформы
     if "youtube.com" in url or "youtu.be" in url:
         platform = "youtube"
@@ -859,176 +1073,169 @@ async def handle_link(message: Message, state: FSMContext):
     elif "instagram.com" in url or "instagr.am" in url:
         platform = "instagram"
     else:
-        await message.answer("❌ Неизвестная платформа. Поддерживаются: YouTube, TikTok, Instagram.")
+        await message.answer(
+            "Неподдерживаемая платформа.\n\n"
+            "Поддерживаются: YouTube, Instagram, TikTok."
+        )
         return
-
-    status_msg = await message.answer("⏳ Обрабатываю...")
+    
+    quality = get_quality_setting(user_id)
     temp_file = None
-    temp_photos = [] # Для фото из Instagram/TikTok
-
+    temp_photos = []
+    
     try:
         if platform == "youtube":
             temp_file = await download_youtube(url, quality)
             if not temp_file:
-                # Если основной способ не сработал, пробуем Playwright
                 temp_file = await download_youtube_with_playwright(url, quality)
+            
+            if temp_file:
+                await send_video_or_message(chat_id, temp_file)
+                cleanup_file(temp_file)
+                increment_downloads(user_id)
+                
+                # Проверка реферала
+                user = users_data[user_id]
+                if user['referred_by'] and user['downloads_today'] == 1:
+                    referrer = users_data[user['referred_by']]
+                    if user_id not in referrer.get('referrals_completed', []):
+                        referrer.setdefault('referrals_completed', []).append(user_id)
+                        activate_premium(user['referred_by'])
+                        activate_premium(user_id)
+                        save_users_data()
+                        
+                        await bot.send_message(
+                            user['referred_by'],
+                            "Поздравляем! Ваш друг выполнил условия.\n"
+                            "Вам активирован Премиум на 1 год!"
+                        )
+            else:
+                await message.answer(
+                    "Не удалось скачать видео.\n\n"
+                    "Возможные причины:\n"
+                    "• Видео приватное или удалено\n"
+                    "• Проблемы с доступом к платформе\n"
+                    "• Некорректная ссылка"
+                )
+        
         elif platform == "tiktok":
-            if '/photo/' in url.lower() or '/photos/' in url.lower():
-                # Обработка фото/карусели TikTok
+            if '/photo/' in url.lower():
                 photos, description = await download_tiktok_photos(url)
-                await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
                 if photos:
                     temp_photos = photos
-                    # Отправляем фото как медиа-группу
-                    media_group = [InputMediaPhoto(media=FSInputFile(photo),
-                                                   caption=description if i == 0 else None # Подпись только к первому фото
-                                                  ) for i, photo in enumerate(photos)]
-                    # Отправляем группу фото (ограничение Telegram - 10 фото за раз)
+                    media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
+                    
                     batch_size = 10
                     for i in range(0, len(media_group), batch_size):
                         batch = media_group[i:i + batch_size]
-                        await bot.send_media_group(chat_id=message.chat.id, media=batch)
-                    logger.info(f"✅ Отправлено {len(photos)} фото из TikTok")
+                        await bot.send_media_group(chat_id=chat_id, media=batch)
+                    
                     cleanup_files(photos)
-                    return # Выход из обработки, так как фото отправлены
+                    increment_downloads(user_id)
                 else:
-                    await message.answer("❌ Не удалось скачать фото с TikTok.")
-                    return
+                    await message.answer("Не удалось скачать фото с TikTok.")
             else:
-                # Обработка видео TikTok
                 temp_file = await download_tiktok(url, quality)
+                if temp_file:
+                    await send_video_or_message(chat_id, temp_file)
+                    cleanup_file(temp_file)
+                    increment_downloads(user_id)
+                else:
+                    await message.answer("Не удалось скачать видео с TikTok.")
+        
         elif platform == "instagram":
-            # Обработка Instagram (видео, фото, карусель)
             video_path, photos, description = await download_instagram(url)
-            await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            
             if video_path:
-                temp_file = video_path
-                # Проверяем, является ли ссылка Reel
-                is_reel = '/reel/' in url.lower()
-                # Если это Reel, не отправляем описание
-                caption_to_send = "" if is_reel else description
-                await send_video_or_message(message.chat.id, temp_file, caption=caption_to_send)
-                cleanup_file(temp_file)
-                return
+                await send_video_or_message(chat_id, video_path)
+                cleanup_file(video_path)
+                increment_downloads(user_id)
             elif photos:
                 temp_photos = photos
-                # Отправляем фото как медиа-группу
-                media_group = [InputMediaPhoto(media=FSInputFile(photo),
-                                               caption=description if i == 0 else None # Подпись только к первому фото
-                                              ) for i, photo in enumerate(photos)]
-                # Отправляем группу фото (ограничение Telegram - 10 фото за раз)
+                media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
+                
                 batch_size = 10
                 for i in range(0, len(media_group), batch_size):
                     batch = media_group[i:i + batch_size]
-                    await bot.send_media_group(chat_id=message.chat.id, media=batch)
-                logger.info(f"✅ Отправлено {len(photos)} фото из Instagram")
+                    await bot.send_media_group(chat_id=chat_id, media=batch)
+                
                 cleanup_files(photos)
-                return
+                increment_downloads(user_id)
             else:
-                await message.answer("❌ Не удалось скачать медиа с Instagram.")
-                return
-
-                # Обработка результата для видео (YouTube, TikTok)
-        await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        if temp_file:
-            # --- ИСПРАВЛЕНО ---
-            # Для YouTube и TikTok видео caption (описание) не отправляется.
-            # Переменная description не определена для YouTube, её использование вызовет ошибку.
-            # Для Instagram Reels caption также не отправляется (is_reel).
-            # Для других Instagram видео caption может быть определён выше.
-            if platform == "youtube":
-                 # Не передаём caption для YouTube
-                await send_video_or_message(message.chat.id, temp_file) # caption не передаётся
-            elif platform == "tiktok":
-                 # Не передаём caption для TikTok видео
-                await send_video_or_message(message.chat.id, temp_file) # caption не передаётся
-            else: # platform == "instagram" (и это видео, а не фото)
-                 # Здесь description должна быть определена выше для Instagram
-                 # Проверяем, является ли это Reel
-                is_reel = '/reel/' in url.lower()
-                caption_to_send = "" if is_reel else description
-                await send_video_or_message(message.chat.id, temp_file, caption=caption_to_send)
-            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-            cleanup_file(temp_file) # Удаляем файл после отправки
-        else:
-            await message.answer("❌ Не удалось скачать видео.")
-
+                await message.answer("Не удалось скачать медиа с Instagram.")
+    
     except Exception as e:
-        error_msg = f"❌ Ошибка: {str(e)}"
-        logger.error(error_msg)
-        try:
-            await bot.edit_message_text(text=error_msg, chat_id=chat_id, message_id=status_msg.message_id)
-        except:
-            await message.answer(error_msg)
+        logger.error(f"Ошибка обработки ссылки: {e}")
+        await message.answer(
+            "Произошла ошибка при обработке вашего запроса.\n\n"
+            "Попробуйте позже или обратитесь к администратору."
+        )
     finally:
-        # Убедимся, что файлы удалены в любом случае
         if temp_file:
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
 
+# ==================== ЗАПУСК БОТА ====================
 
-# - Основная функция запуска -
 async def main():
+    """Основная функция запуска"""
     global bot
-    logger.info("🚀 Запуск бота...")
+    logger.info("Запуск бота...")
+    
     if not BOT_TOKEN:
-        raise ValueError("❌ BOT_TOKEN не найден в переменных окружения")
-
-    # Инициализация cookies из переменных окружения
+        raise ValueError("BOT_TOKEN не найден в переменных окружения")
+    
     init_cookies_from_env()
     load_user_settings()
-
-    # Инициализация Playwright
+    load_users_data()
+    load_referrals()
+    
     await init_instagram_playwright()
     await init_youtube_playwright()
-
+    
     bot = Bot(token=BOT_TOKEN, session=AiohttpSession())
-
+    
     WEBHOOK_PATH = "/webhook"
     WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
+    
     if WEBHOOK_URL:
-        # - Режим Webhook -
-        WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-        logger.info(f"📡 Работаю в режиме Webhook: {WEBHOOK_URL}")
+        logger.info(f"Работаю в режиме Webhook: {WEBHOOK_URL}")
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_webhook(WEBHOOK_URL)
+        
         app = aiohttp.web.Application()
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
         webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+        
         async def health(request):
             return aiohttp.web.Response(text="OK")
+        
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
-
         
-
-       
-
         runner = aiohttp.web.AppRunner(app)
         await runner.setup()
-        site = aiohttp.web.TCPSite(runner, '0.0.0.0', PORT) # Порт для вебхука
+        site = aiohttp.web.TCPSite(runner, '0.0.0.0', PORT)
         await site.start()
-        logger.info(f"✅ Webhook запущен на порту {PORT}")
-        # Ожидание завершения (обычно через сигнал)
+        logger.info(f"Webhook запущен на порту {PORT}")
+        
         await asyncio.Event().wait()
     else:
-        # - Режим Polling -
-        logger.info("🔄 Работаю в режиме Polling")
+        logger.info("Работаю в режиме Polling")
         await bot.delete_webhook(drop_pending_updates=True)
         try:
             await dp.start_polling(bot)
         finally:
             save_user_settings()
-            logger.info("🛑 Бот остановлен (Polling)")
-
-    # Закрытие браузеров Playwright при завершении
+            save_users_data()
+            save_referrals()
+            logger.info("Бот остановлен")
+    
     if IG_BROWSER:
-        logger.info("🛑 Закрываю браузер Instagram Playwright...")
         await IG_BROWSER.close()
     if YT_BROWSER:
-        logger.info("🛑 Закрываю браузер YouTube Playwright...")
         await YT_BROWSER.close()
 
 if __name__ == "__main__":
