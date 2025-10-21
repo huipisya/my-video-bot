@@ -874,17 +874,35 @@ async def cmd_expand(message: Message):
 
 # ==================== ОБРАБОТЧИКИ CALLBACK ====================
 
-@dp.callback_query(F.data.in_(["best", "1080p", "720p", "480p", "audio", "cancel"]))
-async def process_quality_callback(callback: CallbackQuery):
+
+@dp.callback_query(F.data == "best")
+async def process_quality_best(callback: CallbackQuery):
+    await process_quality_selection(callback, "best")
+
+@dp.callback_query(F.data == "1080p")
+async def process_quality_1080p(callback: CallbackQuery):
+    await process_quality_selection(callback, "1080p")
+
+@dp.callback_query(F.data == "720p")
+async def process_quality_720p(callback: CallbackQuery):
+    await process_quality_selection(callback, "720p")
+
+@dp.callback_query(F.data == "480p")
+async def process_quality_480p(callback: CallbackQuery):
+    await process_quality_selection(callback, "480p")
+
+@dp.callback_query(F.data == "audio")
+async def process_quality_audio(callback: CallbackQuery):
+    await process_quality_selection(callback, "audio")
+
+@dp.callback_query(F.data == "cancel")
+async def process_quality_cancel(callback: CallbackQuery):
+    await callback.message.edit_text("Отменено.")
+    await callback.answer()
+
+async def process_quality_selection(callback: CallbackQuery, quality: str):
     """Обработка выбора качества"""
     user_id = callback.from_user.id
-    quality = callback.data
-    
-    if quality == "cancel":
-        await callback.message.edit_text("Отменено.")
-        await callback.answer()
-        return
-    
     is_premium_user = is_premium(user_id)
     
     # Проверка премиум-качества
@@ -923,7 +941,9 @@ async def process_invite_friend(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
     
-    bot_username = (await bot.get_me()).username
+    # Получаем username бота
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
     referral_link = f"https://t.me/{bot_username}?start={user['referral_code']}"
     
     text = (
@@ -1027,21 +1047,34 @@ async def process_conditions(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_to_menu")
 async def process_back_to_menu(callback: CallbackQuery):
     """Возврат в главное меню"""
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    
     welcome_text = (
         "Кидайте ссылку — пришлю файл.\n\n"
         "Можно выбрать качество или оформить PRO."
     )
-    await callback.message.answer(welcome_text, reply_markup=main_keyboard())
+    await bot.send_message(callback.from_user.id, welcome_text, reply_markup=main_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "share_bot")
 async def process_share_bot(callback: CallbackQuery):
     """Поделиться ботом"""
-    bot_username = (await bot.get_me()).username
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
     share_text = f"Попробуй этого бота для скачивания видео: https://t.me/{bot_username}"
     
     await callback.answer(f"Поделитесь этой ссылкой: {share_text}", show_alert=True)
+
+# Обработчик для неизвестных callback'ов (для отладки)
+@dp.callback_query()
+async def process_unknown_callback(callback: CallbackQuery):
+    """Обработка неизвестных callback'ов"""
+    logger.warning(f"Неизвестный callback: {callback.data}")
+    await callback.answer("Эта кнопка пока не работает", show_alert=True)
+
 
 # ==================== ОБРАБОТЧИК ССЫЛОК ====================
 
