@@ -696,17 +696,17 @@ def quality_keyboard(user_id: int) -> InlineKeyboardMarkup:
     
     buttons = [
         [InlineKeyboardButton(text="Максимальное качество без сжатия Telegram", 
-                             callback_data="quality_best")],
+                             callback_data="best")],
         [InlineKeyboardButton(text="1080p (Премиум)", 
-                             callback_data="quality_1080p")],
+                             callback_data="1080p")],
         [InlineKeyboardButton(text="720p", 
-                             callback_data="quality_720p")],
+                             callback_data="720p")],
         [InlineKeyboardButton(text="480p", 
-                             callback_data="quality_480p")],
+                             callback_data="480p")],
         [InlineKeyboardButton(text="Только аудио", 
-                             callback_data="quality_audio")],
+                             callback_data="audio")],
         [InlineKeyboardButton(text="Отмена", 
-                             callback_data="quality_cancel")],
+                             callback_data="cancel")],
     ]
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -874,11 +874,11 @@ async def cmd_expand(message: Message):
 
 # ==================== ОБРАБОТЧИКИ CALLBACK ====================
 
-@dp.callback_query(F.data.startswith("quality_"))
+@dp.callback_query(F.data.in_(["best", "1080p", "720p", "480p", "audio", "cancel"]))
 async def process_quality_callback(callback: CallbackQuery):
     """Обработка выбора качества"""
     user_id = callback.from_user.id
-    quality = callback.data.replace("quality_", "")
+    quality = callback.data
     
     if quality == "cancel":
         await callback.message.edit_text("Отменено.")
