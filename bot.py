@@ -97,6 +97,9 @@ def init_cookies_from_env():
     """Создаёт файлы cookies из переменных окружения."""
     cookie_env_to_file = {
         "COOKIES_YOUTUBE": "cookies_youtube.txt",
+        "COOKIES_BOT1": "cookies_instagram_bot1.txt",
+        "COOKIES_BOT2": "cookies_instagram_bot2.txt",
+        "COOKIES_BOT3": "cookies_instagram_bot3.txt",
     }
     created_files = []
     for env_var, filename in cookie_env_to_file.items():
@@ -125,7 +128,6 @@ def init_cookies_from_env():
             logger.info(f"🍪 Переменная окружения {env_var} не найдена")
 
     # Создание пустого файла cookies_youtube.txt, если он не был создан из переменной окружения
-    # Это изменение также важно, чтобы убедиться, что файл существует, даже если переменная пуста
     if "cookies_youtube.txt" not in created_files:
         if not os.path.exists("cookies_youtube.txt"):
             Path("cookies_youtube.txt").touch()
