@@ -963,12 +963,12 @@ async def process_invite_friend(callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
-@dp.callback_query(F.data == "check_referral")
 async def process_check_referral(callback: CallbackQuery):
     """Проверка реферального приглашения"""
+    await callback.answer()  # <-- ПЕРЕМЕСТИТЬ В НАЧАЛО
+    
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
-    await callback.answer()
     
     # Проверяем, есть ли успешные рефералы
     completed_referrals = user.get('referrals_completed', [])
@@ -1016,7 +1016,7 @@ async def process_how_referral_works(callback: CallbackQuery):
     ])
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
+    
 
 @dp.callback_query(F.data == "conditions")
 async def process_conditions(callback: CallbackQuery):
@@ -1047,7 +1047,7 @@ async def process_conditions(callback: CallbackQuery):
     
     keyboard = conditions_keyboard(is_premium_user)
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
+    
 
 @dp.callback_query(F.data == "back_to_menu")
 async def process_back_to_menu(callback: CallbackQuery):
@@ -1068,11 +1068,13 @@ async def process_back_to_menu(callback: CallbackQuery):
 @dp.callback_query(F.data == "share_bot")
 async def process_share_bot(callback: CallbackQuery):
     """Поделиться ботом"""
+    await callback.answer()  
+    
     bot_info = await bot.get_me()
     bot_username = bot_info.username
     share_text = f"Попробуй этого бота для скачивания видео: https://t.me/{bot_username}"
     
-    await callback.answer(f"Поделитесь этой ссылкой: {share_text}", show_alert=True)
+    await bot.send_message(callback.from_user.id, f"Поделитесь этой ссылкой:\n\n{share_text}")
 
 # Обработчик для неизвестных callback'ов (для отладки)
 @dp.callback_query()
