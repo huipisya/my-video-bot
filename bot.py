@@ -873,169 +873,38 @@ async def cmd_expand(message: Message):
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 # ==================== ОБРАБОТЧИКИ CALLBACK ====================
-
-
-@dp.callback_query(F.data == "best")
-async def process_quality_best(callback: CallbackQuery):
-    await process_quality_selection(callback, "best")
-
-@dp.callback_query(F.data == "1080p")
-async def process_quality_1080p(callback: CallbackQuery):
-    await process_quality_selection(callback, "1080p")
-
-@dp.callback_query(F.data == "720p")
-async def process_quality_720p(callback: CallbackQuery):
-    await process_quality_selection(callback, "720p")
-
-@dp.callback_query(F.data == "480p")
-async def process_quality_480p(callback: CallbackQuery):
-    await process_quality_selection(callback, "480p")
-
-@dp.callback_query(F.data == "audio")
-async def process_quality_audio(callback: CallbackQuery):
-    await process_quality_selection(callback, "audio")
-
-@dp.callback_query(F.data == "cancel")
-async def process_quality_cancel(callback: CallbackQuery):
-    await callback.answer()  
-    await callback.message.edit_text("Отменено.")
-
-async def process_quality_selection(callback: CallbackQuery, quality: str):
-    """Обработка выбора качества"""
-    # await callback.answer()  # <-- УДАЛИТЕ ЭТУ СТРОКУ!
-    
-    user_id = callback.from_user.id
-    is_premium_user = is_premium(user_id)
-    
-    # Проверка премиум-качества
-    if quality in PREMIUM_QUALITY_OPTIONS and not is_premium_user:
-        await callback.answer("Требуется премиум! Пригласите друга", show_alert=True)
-        text = (
-            "Максимальное качество доступно только в Премиуме.\n\n"
-            "Пригласите друга — получите год бесплатно."
-        )
-        await callback.message.edit_text(text, reply_markup=premium_required_keyboard())
-        return
-    
-    # Добавьте answer() здесь для успешного случая
-    await callback.answer()
-    
-    # Сохраняем выбранное качество
-    user_settings[user_id] = quality
-    save_user_settings()
-    
-    quality_names = {
-        'best': 'Максимальное качество',
-        '1080p': '1080p',
-        '720p': '720p',
-        '480p': '480p',
-        'audio': 'Только аудио'
-    }
-    
-    quality_name = quality_names.get(quality, quality)
-    
-    await callback.message.edit_text(
-        f"Установлено качество <b>{quality_name}</b>.",
-        parse_mode="HTML"
-    )
-
 @dp.callback_query(F.data == "invite_friend")
 async def process_invite_friend(callback: CallbackQuery):
-    """Обработка приглашения друга"""
-    await callback.answer()
-    
+    """Обработчик приглашения друга"""
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'invite_friend'")
+    await callback.answer() # Отвечаем перед редактированием
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
-    
-    # Получаем username бота
-    bot_info = await bot.get_me()
-    bot_username = bot_info.username
-    referral_link = f"https://t.me/{bot_username}?start={user['referral_code']}"
-    
+    referral_link = f"https://t.me/{BOT_USERNAME}?start={user['referral_code']}"
     text = (
-        f"Чтобы пригласить друга, отправьте ему эту реферальную ссылку:\n\n"
+        "<b>Пригласите друга и получите Премиум на 1 год!</b>\n\n"
+        "Вот ваша персональная ссылка:\n"
         f"<code>{referral_link}</code>\n\n"
-        "Когда друг скачает первое видео, вы получите режим Премиум на 1 год."
+        "Как только ваш друг выполнит первое скачивание, вам и ему будет активирован Премиум."
     )
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Скопировать ссылку", url=referral_link)],
-        [InlineKeyboardButton(text="Проверить приглашение", callback_data="check_referral")],
-        [InlineKeyboardButton(text="Как это работает", callback_data="how_referral_works")],
-        [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")],
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-
-@dp.callback_query(F.data == "check_referral")  # <-- ДОБАВИТЬ ДЕКОРАТОР
-async def process_check_referral(callback: CallbackQuery):
-    """Проверка реферального приглашения"""
-    await callback.answer()
-    
-    user_id = callback.from_user.id
-    user = get_or_create_user(user_id)
-    
-    # Проверяем, есть ли успешные рефералы
-    completed_referrals = user.get('referrals_completed', [])
-    
-    if completed_referrals:
-        text = (
-            "Друг выполнил условия ✅\n\n"
-            "Вы можете пользоваться тарифом «Премиум»."
-        )
-        keyboard = back_to_menu_keyboard()
-    else:
-        text = (
-            "Друг пока не выполнил условия ❌\n\n"
-            "<b>Мы всё сделали, но ничего не работает</b>\n\n"
-            f"Пришлите админу телеграм тег друга и доказательства, что друг выполнил все условия.\n\n"
-            "Мы всё проверим и выдадим подписку вручную.\n\n"
-            f"Контакт админа: {ADMIN_USERNAME}"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Написать админу", 
-                                 url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
-            [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")],
-        ])
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "how_referral_works")
-async def process_how_referral_works(callback: CallbackQuery):
-    """Как работает реферальная система"""
-    await callback.answer()
-
-    text = (
-        "<b>Как это работает:</b>\n\n"
-        "— Пригласите друга по вашей ссылке.\n"
-        "— Он должен запустить бота и загрузить любое видео.\n"
-        "— После этого у вас активируется PRO на 365 дней.\n\n"
-        "Друг тоже получит год бесплатно, если пригласит ещё одного друга.\n\n"
-        "Через год подписка будет стоить 50 ₽/месяц."
-    )
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Скопировать ссылку", callback_data="invite_friend")],
         [InlineKeyboardButton(text="Вернуться в главное меню", callback_data="back_to_menu")],
     ])
-    
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    
 
 @dp.callback_query(F.data == "conditions")
 async def process_conditions(callback: CallbackQuery):
     """Условия использования"""
-    await callback.answer()
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'conditions'")
+    await callback.answer() # Отвечаем перед редактированием
     user_id = callback.from_user.id
     is_premium_user = is_premium(user_id)
-    
     if is_premium_user:
         user = users_data[user_id]
         premium_until = datetime.fromisoformat(user['premium_until']).strftime('%d.%m.%Y')
-        
         text = (
-            f"<b>У вас активен Премиум до {premium_until}.</b>\n\n"
+            f"<b>У вас активен Премиум до {premium_until}.</b>\n"
             "Доступны:\n"
             "• Максимальное качество\n"
             "• Плейлисты и батчи\n"
@@ -1044,28 +913,25 @@ async def process_conditions(callback: CallbackQuery):
         )
     else:
         text = (
-            "<b>По умолчанию — 5 загрузок в сутки и без максимума качества.</b>\n\n"
-            "Разблокируйте всё на 1 год бесплатно — пригласите друга по вашей ссылке.\n\n"
-            "Через год это будет стоить 50 ₽/год.\n\n"
+            "<b>По умолчанию — 5 загрузок в сутки и без максимума качества.</b>\n"
+            "Разблокируйте всё на 1 год бесплатно — пригласите друга по вашей ссылке.\n"
+            "Через год это будет стоить 50 ₽/год.\n"
             "Сейчас — бесплатно. На год. Просто, блядь, бесплатно."
         )
-    
     keyboard = conditions_keyboard(is_premium_user)
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    
 
 @dp.callback_query(F.data == "back_to_menu")
 async def process_back_to_menu(callback: CallbackQuery):
     """Возврат в главное меню"""
-    await callback.answer()
-    
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'back_to_menu'")
+    await callback.answer() # Отвечаем перед редактированием
     try:
         await callback.message.delete()
     except Exception:
         pass
-    
     welcome_text = (
-        "Кидайте ссылку — пришлю файл.\n\n"
+        "Кидайте ссылку — пришлю файл.\n"
         "Можно выбрать качество или оформить PRO."
     )
     await bot.send_message(callback.from_user.id, welcome_text, reply_markup=main_keyboard())
@@ -1073,20 +939,20 @@ async def process_back_to_menu(callback: CallbackQuery):
 @dp.callback_query(F.data == "share_bot")
 async def process_share_bot(callback: CallbackQuery):
     """Поделиться ботом"""
-    await callback.answer()  
-    
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'share_bot'")
+    await callback.answer()  # Отвечаем перед отправкой нового сообщения
     bot_info = await bot.get_me()
     bot_username = bot_info.username
     share_text = f"Попробуй этого бота для скачивания видео: https://t.me/{bot_username}"
-    
-    await bot.send_message(callback.from_user.id, f"Поделитесь этой ссылкой:\n\n{share_text}")
+    await bot.send_message(callback.from_user.id, f"Поделитесь этой ссылкой:\n{share_text}")
 
 # Обработчик для неизвестных callback'ов (для отладки)
 @dp.callback_query()
 async def process_unknown_callback(callback: CallbackQuery):
     """Обработка неизвестных callback'ов"""
-    logger.warning(f"Неизвестный callback: {callback.data}")
+    logger.warning(f"Неизвестный callback от {callback.from_user.id}: {callback.data}")
     await callback.answer("Эта кнопка пока не работает", show_alert=True)
+
 
 
 # ==================== ОБРАБОТЧИК ССЫЛОК ====================
