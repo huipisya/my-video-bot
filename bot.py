@@ -907,12 +907,12 @@ async def process_quality_selection(callback: CallbackQuery, quality: str):
     
     # Проверка премиум-качества
     if quality in PREMIUM_QUALITY_OPTIONS and not is_premium_user:
+        await callback.answer("Требуется премиум! Пригласите друга", show_alert=True)
         text = (
             "Максимальное качество доступно только в Премиуме.\n\n"
             "Пригласите друга — получите год бесплатно."
         )
         await callback.message.edit_text(text, reply_markup=premium_required_keyboard())
-        await callback.answer("Требуется премиум", show_alert=True)
         return
     
     # Сохраняем выбранное качество
@@ -929,15 +929,17 @@ async def process_quality_selection(callback: CallbackQuery, quality: str):
     
     quality_name = quality_names.get(quality, quality)
     
+    await callback.answer()
     await callback.message.edit_text(
         f"Установлено качество <b>{quality_name}</b>.",
         parse_mode="HTML"
     )
-    await callback.answer()
 
 @dp.callback_query(F.data == "invite_friend")
 async def process_invite_friend(callback: CallbackQuery):
     """Обработка приглашения друга"""
+    await callback.answer()
+    
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
     
@@ -960,13 +962,13 @@ async def process_invite_friend(callback: CallbackQuery):
     ])
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
 
 @dp.callback_query(F.data == "check_referral")
 async def process_check_referral(callback: CallbackQuery):
     """Проверка реферального приглашения"""
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
+    await callback.answer()
     
     # Проверяем, есть ли успешные рефералы
     completed_referrals = user.get('referrals_completed', [])
@@ -997,6 +999,8 @@ async def process_check_referral(callback: CallbackQuery):
 @dp.callback_query(F.data == "how_referral_works")
 async def process_how_referral_works(callback: CallbackQuery):
     """Как работает реферальная система"""
+    await callback.answer()
+
     text = (
         "<b>Как это работает:</b>\n\n"
         "— Пригласите друга по вашей ссылке.\n"
@@ -1017,6 +1021,7 @@ async def process_how_referral_works(callback: CallbackQuery):
 @dp.callback_query(F.data == "conditions")
 async def process_conditions(callback: CallbackQuery):
     """Условия использования"""
+    await callback.answer()
     user_id = callback.from_user.id
     is_premium_user = is_premium(user_id)
     
@@ -1047,6 +1052,8 @@ async def process_conditions(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_to_menu")
 async def process_back_to_menu(callback: CallbackQuery):
     """Возврат в главное меню"""
+    await callback.answer()
+    
     try:
         await callback.message.delete()
     except Exception:
@@ -1057,7 +1064,6 @@ async def process_back_to_menu(callback: CallbackQuery):
         "Можно выбрать качество или оформить PRO."
     )
     await bot.send_message(callback.from_user.id, welcome_text, reply_markup=main_keyboard())
-    await callback.answer()
 
 @dp.callback_query(F.data == "share_bot")
 async def process_share_bot(callback: CallbackQuery):
