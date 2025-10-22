@@ -897,8 +897,8 @@ async def process_quality_audio(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "cancel")
 async def process_quality_cancel(callback: CallbackQuery):
+    await callback.answer()  
     await callback.message.edit_text("Отменено.")
-    await callback.answer()
 
 async def process_quality_selection(callback: CallbackQuery, quality: str):
     """Обработка выбора качества"""
@@ -931,6 +931,7 @@ async def process_quality_selection(callback: CallbackQuery, quality: str):
     
     quality_name = quality_names.get(quality, quality)
     
+
     await callback.message.edit_text(
         f"Установлено качество <b>{quality_name}</b>.",
         parse_mode="HTML"
