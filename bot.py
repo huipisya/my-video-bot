@@ -902,7 +902,7 @@ async def process_quality_cancel(callback: CallbackQuery):
 
 async def process_quality_selection(callback: CallbackQuery, quality: str):
     """Обработка выбора качества"""
-    await callback.answer()  # <-- ДОБАВИТЬ В НАЧАЛО
+    # await callback.answer()  # <-- УДАЛИТЕ ЭТУ СТРОКУ!
     
     user_id = callback.from_user.id
     is_premium_user = is_premium(user_id)
@@ -916,6 +916,9 @@ async def process_quality_selection(callback: CallbackQuery, quality: str):
         )
         await callback.message.edit_text(text, reply_markup=premium_required_keyboard())
         return
+    
+    # Добавьте answer() здесь для успешного случая
+    await callback.answer()
     
     # Сохраняем выбранное качество
     user_settings[user_id] = quality
@@ -931,7 +934,6 @@ async def process_quality_selection(callback: CallbackQuery, quality: str):
     
     quality_name = quality_names.get(quality, quality)
     
-
     await callback.message.edit_text(
         f"Установлено качество <b>{quality_name}</b>.",
         parse_mode="HTML"
