@@ -902,6 +902,8 @@ async def process_quality_cancel(callback: CallbackQuery):
 
 async def process_quality_selection(callback: CallbackQuery, quality: str):
     """Обработка выбора качества"""
+    await callback.answer()  # <-- ДОБАВИТЬ В НАЧАЛО
+    
     user_id = callback.from_user.id
     is_premium_user = is_premium(user_id)
     
@@ -929,7 +931,6 @@ async def process_quality_selection(callback: CallbackQuery, quality: str):
     
     quality_name = quality_names.get(quality, quality)
     
-    await callback.answer()
     await callback.message.edit_text(
         f"Установлено качество <b>{quality_name}</b>.",
         parse_mode="HTML"
@@ -963,9 +964,10 @@ async def process_invite_friend(callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
+@dp.callback_query(F.data == "check_referral")  # <-- ДОБАВИТЬ ДЕКОРАТОР
 async def process_check_referral(callback: CallbackQuery):
     """Проверка реферального приглашения"""
-    await callback.answer()  # <-- ПЕРЕМЕСТИТЬ В НАЧАЛО
+    await callback.answer()
     
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
@@ -994,7 +996,7 @@ async def process_check_referral(callback: CallbackQuery):
         ])
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
+
 
 @dp.callback_query(F.data == "how_referral_works")
 async def process_how_referral_works(callback: CallbackQuery):
