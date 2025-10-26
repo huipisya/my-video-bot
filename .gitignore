@@ -43,10 +43,13 @@ venv.bak/
 secrets.json
 credentials.json
 cookies.txt
+cookies_bot1
+cookies_bot2
+cookies_bot3
 session/*
 *.session
 *.session-journal
-.env.example
+
 # ==============================
 # 🗃️ КЭШ И ВРЕМЕННЫЕ ФАЙЛЫ БОТА
 # ==============================
@@ -89,12 +92,10 @@ Thumbs.db
 # 🚀 DEPLOYMENT (Railway, Docker и др.)
 # ==============================
 .dockerignore
-Dockerfile
 Procfile
 runtime.txt
 webhook.log
 railway.log
-*.log
 
 # ==============================
 # 📁 ОБЩИЕ ИГНОРЫ
