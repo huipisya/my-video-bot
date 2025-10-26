@@ -1112,7 +1112,7 @@ async def main():
     WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
     
     if WEBHOOK_URL:
-        logger.info(f"Работаю в режиме Webhook: {WEBHOOK_URL}")
+        logger.info(f"Работаю в рэжиме Webhook: {WEBHOOK_URL}")
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_webhook(WEBHOOK_URL)
         
