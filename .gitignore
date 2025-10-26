@@ -89,7 +89,7 @@ Thumbs.db
 *.komodoproject
 
 # ==============================
-# 🚀 DEPLOYMENT (Railway, Docker и др.)
+# 🚀 DEPLOYMENT (Railway, Docker и др.
 # ==============================
 .dockerignore
 Procfile
