@@ -1015,14 +1015,6 @@ async def process_how_referral_works(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-# Обработчик для неизвестных callback'ов (для отладки)
-@dp.callback_query()
-async def process_unknown_callback(callback: CallbackQuery):
-    """Обработка неизвестных callback'ов"""
-    logger.warning(f"Неизвестный callback от {callback.from_user.id}: {callback.data}")
-    await callback.answer("Эта кнопка пока не работает", show_alert=True)
-
-
 
 # ==================== ОБРАБОТЧИК ССЫЛОК ====================
 
