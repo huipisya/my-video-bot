@@ -949,6 +949,7 @@ async def process_share_bot(callback: CallbackQuery):
 @dp.callback_query(F.data.in_(["best", "1080p", "720p", "480p", "audio"]))
 async def process_quality_choice(callback: CallbackQuery):
     """Обработчик выбора качества"""
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку качества: {callback.data}")
     user_id = callback.from_user.id
     quality = callback.data
     
@@ -964,6 +965,7 @@ async def process_quality_choice(callback: CallbackQuery):
 @dp.callback_query(F.data == "cancel")
 async def process_cancel(callback: CallbackQuery):
     """Отмена выбора качества"""
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'cancel'")
     await callback.answer()
     await callback.message.delete()
     welcome_text = (
@@ -975,6 +977,7 @@ async def process_cancel(callback: CallbackQuery):
 @dp.callback_query(F.data == "check_referral")
 async def process_check_referral(callback: CallbackQuery):
     """Проверка приглашения"""
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'check_referral'")
     user_id = callback.from_user.id
     user = get_or_create_user(user_id)
     
@@ -996,6 +999,7 @@ async def process_check_referral(callback: CallbackQuery):
 @dp.callback_query(F.data == "how_referral_works")
 async def process_how_referral_works(callback: CallbackQuery):
     """Как работает реферальная система"""
+    logger.info(f"Пользователь {callback.from_user.id} нажал кнопку 'how_referral_works'")
     text = (
         "<b>Как работает реферальная система:</b>\n\n"
         "1. Вы получаете уникальную ссылку\n"
