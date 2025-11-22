@@ -946,6 +946,75 @@ async def process_share_bot(callback: CallbackQuery):
     share_text = f"Попробуй этого бота для скачивания видео: https://t.me/{bot_username}"
     await bot.send_message(callback.from_user.id, f"Поделитесь этой ссылкой:\n{share_text}")
 
+@dp.callback_query(F.data.in_(["best", "1080p", "720p", "480p", "audio"]))
+async def process_quality_choice(callback: CallbackQuery):
+    """Обработчик выбора качества"""
+    user_id = callback.from_user.id
+    quality = callback.data
+    
+    user_settings[user_id] = quality
+    save_user_settings()
+    
+    await callback.answer(f"Качество установлено: {quality}")
+    await callback.message.edit_text(
+        f"Качество загрузки изменено на {quality}.",
+        reply_markup=back_to_menu_keyboard()
+    )
+
+@dp.callback_query(F.data == "cancel")
+async def process_cancel(callback: CallbackQuery):
+    """Отмена выбора качества"""
+    await callback.answer()
+    await callback.message.delete()
+    welcome_text = (
+        "Кидайте ссылку — пришлю файл.\n"
+        "Можно выбрать качество или оформить PRO."
+    )
+    await bot.send_message(callback.from_user.id, welcome_text, reply_markup=main_keyboard())
+
+@dp.callback_query(F.data == "check_referral")
+async def process_check_referral(callback: CallbackQuery):
+    """Проверка приглашения"""
+    user_id = callback.from_user.id
+    user = get_or_create_user(user_id)
+    
+    if user['referred_by']:
+        referrer = users_data.get(user['referred_by'])
+        if referrer:
+            text = f"Вы были приглашены пользователем {user['referred_by']}"
+        else:
+            text = "Ваш пригласивший пользователь не найден"
+    else:
+        text = "Вы еще не использовали реферальную ссылку"
+    
+    await callback.answer()
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_to_menu_keyboard()
+    )
+
+@dp.callback_query(F.data == "how_referral_works")
+async def process_how_referral_works(callback: CallbackQuery):
+    """Как работает реферальная система"""
+    text = (
+        "<b>Как работает реферальная система:</b>\n\n"
+        "1. Вы получаете уникальную ссылку\n"
+        "2. Приглашаете друга по этой ссылке\n"
+        "3. Друг выполняет первое скачивание\n"
+        "4. Вам и другу активируется Премиум на 1 год\n\n"
+        "Премиум дает:\n"
+        "• Безлимитные загрузки\n"
+        "• Максимальное качество\n"
+        "• Приоритетную обработку"
+    )
+    
+    await callback.answer()
+    await callback.message.edit_text(
+        text,
+        reply_markup=back_to_menu_keyboard(),
+        parse_mode="HTML"
+    )
+
 # Обработчик для неизвестных callback'ов (для отладки)
 @dp.callback_query()
 async def process_unknown_callback(callback: CallbackQuery):
