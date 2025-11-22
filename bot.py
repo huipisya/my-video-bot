@@ -1189,8 +1189,23 @@ async def main():
         async def health(request):
             return aiohttp.web.Response(text="OK")
         
+        async def webhook_info(request):
+            """Эндпоинт для проверки информации о webhook"""
+            try:
+                webhook_info = await bot.get_webhook_info()
+                info_text = f"Webhook URL: {webhook_info.url}\n"
+                info_text += f"Custom certificate: {webhook_info.use_custom_certificate}\n"
+                info_text += f"Max connections: {webhook_info.max_connections}\n"
+                info_text += f"Allowed updates: {webhook_info.allowed_updates}\n"
+                info_text += f"Pending update count: {webhook_info.pending_update_count}\n"
+                info_text += f"Last error: {webhook_info.last_error_message}\n"
+                return aiohttp.web.Response(text=info_text, content_type="text/plain")
+            except Exception as e:
+                return aiohttp.web.Response(text=f"Error: {e}", content_type="text/plain")
+        
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
+        app.router.add_get("/webhook-info", webhook_info)
         
         runner = aiohttp.web.AppRunner(app)
         await runner.setup()
