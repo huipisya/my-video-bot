@@ -66,14 +66,14 @@ users_data = {}  # {user_id: {premium: bool, premium_until: timestamp, downloads
 referrals = {}  # {referral_code: user_id}
 
 # Константы
-FREE_DAILY_LIMIT = 3
+FREE_DAILY_LIMIT = 4
 PREMIUM_QUALITY_OPTIONS = ['best', '1080p']
 
 # FSM состояния
 class VideoStates(StatesGroup):
     choosing_quality = State()
 
-# ==================== РАБОТА С ДАННЫМИ ====================
+# ==================== РАБОТА С ДАННЫМИ ===================
 
 def load_user_settings():
     global user_settings
