@@ -66,7 +66,7 @@ users_data = {}  # {user_id: {premium: bool, premium_until: timestamp, downloads
 referrals = {}  # {referral_code: user_id}
 
 # Константы
-FREE_DAILY_LIMIT = 100
+FREE_DAILY_LIMIT = 3
 PREMIUM_QUALITY_OPTIONS = ['best', '1080p']
 
 # FSM состояния
