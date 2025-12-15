@@ -384,6 +384,30 @@ def cleanup_files(files: List[str]):
     for file_path in files:
         cleanup_file(file_path)
 
+def _ydl_extract_info(url: str, ydl_opts: Dict[str, Any]) -> Dict[str, Any]:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(url, download=True)
+
+def _ydl_download_info_and_path(url: str, ydl_opts: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        temp_file: Optional[str] = None
+        try:
+            temp_file = ydl.prepare_filename(info)
+        except Exception:
+            temp_file = None
+        if temp_file and os.path.exists(temp_file):
+            return info, temp_file
+        return info, None
+
+def _ydl_download_path(url: str, ydl_opts: Dict[str, Any]) -> Optional[str]:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        temp_file = ydl.prepare_filename(info)
+        if temp_file and os.path.exists(temp_file):
+            return temp_file
+    return None
+
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube"""
     logger.info(f"Скачивание с YouTube (качество={quality})...")
@@ -391,12 +415,10 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     # Попытка без cookies
     ydl_opts_no_cookies = get_ydl_opts(quality, use_youtube_cookies=False)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            if temp_file and os.path.exists(temp_file):
-                logger.info(f"Видео скачано через yt-dlp без куки")
-                return temp_file
+        temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_no_cookies)
+        if temp_file:
+            logger.info(f"Видео скачано через yt-dlp без куки")
+            return temp_file
     except Exception as e:
         logger.error(f"Ошибка yt-dlp (без куки): {e}")
 
@@ -404,12 +426,10 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     ydl_opts_with_cookies = get_ydl_opts(quality, use_youtube_cookies=True)
     if ydl_opts_with_cookies.get('cookiefile'):
         try:
-            with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
-                info = ydl.extract_info(url, download=True)
-                temp_file = ydl.prepare_filename(info)
-                if temp_file and os.path.exists(temp_file):
-                    logger.info(f"Видео скачано через yt-dlp с куки")
-                    return temp_file
+            temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_with_cookies)
+            if temp_file:
+                logger.info(f"Видео скачано через yt-dlp с куки")
+                return temp_file
         except Exception as e:
             logger.error(f"Ошибка yt-dlp (с куки): {e}")
 
@@ -458,12 +478,10 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
         else:
             ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            if temp_file and os.path.exists(temp_file):
-                logger.info(f"Видео скачано через Playwright")
-                return temp_file
+        temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
+        if temp_file:
+            logger.info(f"Видео скачано через Playwright")
+            return temp_file
 
     except Exception as e:
         logger.error(f"Ошибка в Playwright: {e}")
@@ -490,12 +508,10 @@ async def download_tiktok(url: str, quality: str = "720p") -> Optional[str]:
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            if temp_file and os.path.exists(temp_file):
-                logger.info(f"Видео TikTok скачано")
-                return temp_file
+        temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
+        if temp_file:
+            logger.info(f"Видео TikTok скачано")
+            return temp_file
     except Exception as e:
         logger.error(f"Ошибка скачивания TikTok: {e}")
     
@@ -517,16 +533,15 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_dir = info.get('id')
-            if temp_dir and os.path.isdir(temp_dir):
-                photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
-                             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-                if photo_files:
-                    description = info.get('description', '') or info.get('title', '')
-                    logger.info(f"Скачано {len(photo_files)} фото из TikTok")
-                    return photo_files, description
+        info = await asyncio.to_thread(_ydl_extract_info, url, ydl_opts)
+        temp_dir = info.get('id') if isinstance(info, dict) else None
+        if temp_dir and os.path.isdir(temp_dir):
+            photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
+                         if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+            if photo_files:
+                description = info.get('description', '') or info.get('title', '')
+                logger.info(f"Скачано {len(photo_files)} фото из TikTok")
+                return photo_files, description
     except Exception as e:
         logger.error(f"Ошибка скачивания фото TikTok: {e}")
     
@@ -538,22 +553,21 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
     ydl_opts = get_ydl_opts(quality="best", use_youtube_cookies=False)
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
-            if temp_file and os.path.exists(temp_file):
-                logger.info(f"Медиа Instagram скачано")
-                description = info.get('description', '') or info.get('title', '')
-                return temp_file, None, description
-            else:
-                temp_dir = info.get('id')
-                if temp_dir and os.path.isdir(temp_dir):
-                    photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
-                                 if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-                    if photo_files:
-                        logger.info(f"Скачано {len(photo_files)} фото из Instagram")
-                        description = info.get('description', '') or info.get('title', '')
-                        return None, photo_files, description
+        info, temp_file = await asyncio.to_thread(_ydl_download_info_and_path, url, ydl_opts)
+        if temp_file and isinstance(info, dict):
+            logger.info(f"Медиа Instagram скачано")
+            description = info.get('description', '') or info.get('title', '')
+            return temp_file, None, description
+
+        if isinstance(info, dict):
+            temp_dir = info.get('id')
+            if temp_dir and os.path.isdir(temp_dir):
+                photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
+                             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+                if photo_files:
+                    logger.info(f"Скачано {len(photo_files)} фото из Instagram")
+                    description = info.get('description', '') or info.get('title', '')
+                    return None, photo_files, description
     except Exception as e:
         logger.info(f"yt-dlp не удалось, пробуем Playwright: {e}")
         return await download_instagram_with_playwright(url)
@@ -591,11 +605,9 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
                     'nocheckcertificate': True,
                 }
                 try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(video_url, download=True)
-                        temp_file = ydl.prepare_filename(info)
-                        if temp_file and os.path.exists(temp_file):
-                            return temp_file, None, description
+                    temp_file = await asyncio.to_thread(_ydl_download_path, video_url, ydl_opts)
+                    if temp_file:
+                        return temp_file, None, description
                 except Exception as e:
                     logger.error(f"Ошибка скачивания видео: {e}")
 
@@ -611,8 +623,8 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
             if photo_urls:
                 temp_dir = tempfile.mkdtemp()
                 photo_paths = []
-                for i, photo_url in enumerate(photo_urls):
-                    async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession() as session:
+                    for i, photo_url in enumerate(photo_urls):
                         async with session.get(photo_url) as resp:
                             if resp.status == 200:
                                 photo_path = os.path.join(temp_dir, f"ig_photo_{i+1}.jpg")
@@ -1179,7 +1191,8 @@ async def main():
     if WEBHOOK_URL:
         logger.info(f"Работаю в рэжиме Webhook: {WEBHOOK_URL}")
         await bot.delete_webhook(drop_pending_updates=True)
-        await bot.set_webhook(WEBHOOK_URL)
+        allowed_updates = dp.resolve_used_update_types()
+        await bot.set_webhook(WEBHOOK_URL, allowed_updates=allowed_updates)
         
         app = aiohttp.web.Application()
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler
@@ -1218,7 +1231,8 @@ async def main():
         logger.info("Работаю в режиме Polling")
         await bot.delete_webhook(drop_pending_updates=True)
         try:
-            await dp.start_polling(bot)
+            allowed_updates = dp.resolve_used_update_types()
+            await dp.start_polling(bot, allowed_updates=allowed_updates)
         finally:
             save_user_settings()
             save_users_data()
