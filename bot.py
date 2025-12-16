@@ -476,17 +476,13 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                 return temp_file
         except Exception as e:
             if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts_with_cookies.get('impersonate'):
-                try:
-                    ydl_opts_retry = dict(ydl_opts_with_cookies)
-                    ydl_opts_retry.pop('impersonate', None)
-                    temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
-                    if temp_file:
-                        logger.info(f"Видео скачано через yt-dlp с куки")
-                        return temp_file
-                except Exception as e2:
-                    logger.error(f"Ошибка yt-dlp (с куки): {e2}")
-            else:
-                logger.error(f"Ошибка yt-dlp (с куки): {e}")
+                ydl_opts_retry = dict(ydl_opts_with_cookies)
+                ydl_opts_retry.pop('impersonate', None)
+                temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                if temp_file:
+                    logger.info(f"Видео скачано через yt-dlp с куки")
+                    return temp_file
+            raise
 
     logger.error("Обе попытки скачивания не удались")
     return None
@@ -707,10 +703,27 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     
     return None, None, ""
 
+async def upload_to_0x0(file_path: str) -> Optional[str]:
+    url = (os.getenv('ZEROX0_URL') or 'https://0x0.st').strip()
+    try:
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('file', f, filename=Path(file_path).name)
+                async with session.post(url, data=data, headers={'Accept': 'text/plain'}) as resp:
+                    body_text = (await resp.text()).strip()
+                    if resp.status == 200 and body_text.startswith('http'):
+                        return body_text
+                    logger.error(f"0x0.st ответил {resp.status}: {body_text[:500]}")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки на 0x0.st: {e}")
+    return None
+
 async def upload_to_fileio(file_path: str) -> Optional[str]:
     """Загрузка на file.io"""
     url_candidates_raw = [
         (os.getenv('FILEIO_URL') or '').strip(),
+        'https://file.io',
         'https://file.io/',
         'https://www.file.io/',
     ]
@@ -758,9 +771,11 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
     file_size = os.path.getsize(file_path)
     
     if file_size > max_telegram_file_size:
-        fileio_link = await upload_to_fileio(file_path)
-        if fileio_link:
-            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {fileio_link}")
+        link = await upload_to_fileio(file_path)
+        if not link:
+            link = await upload_to_0x0(file_path)
+        if link:
+            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
         else:
             await bot.send_message(chat_id, "Не удалось загрузить файл.")
     else:
