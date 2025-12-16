@@ -709,7 +709,12 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
 
 async def upload_to_fileio(file_path: str) -> Optional[str]:
     """Загрузка на file.io"""
-    url = 'https://www.file.io/'
+    url_candidates_raw = [
+        (os.getenv('FILEIO_URL') or '').strip(),
+        'https://file.io/',
+        'https://www.file.io/',
+    ]
+    url_candidates = [u for u in url_candidates_raw if u]
     max_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
     
@@ -717,24 +722,31 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
         logger.info(f"Файл превышает 50 MB, загружаю на file.io...")
         try:
             async with aiohttp.ClientSession() as session:
-                with open(file_path, 'rb') as f:
-                    data = aiohttp.FormData()
-                    data.add_field('file', f, filename=Path(file_path).name)
-                    async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
-                        body_text = await resp.text()
-                        if resp.status != 200:
-                            logger.error(f"file.io ответил {resp.status}: {body_text[:500]}")
-                            return None
-                        try:
-                            response_json = json.loads(body_text)
-                        except Exception:
-                            logger.error(f"file.io вернул не-JSON (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
-                            return None
-                        if response_json.get('success'):
-                            fileio_link = response_json.get('link')
-                            if fileio_link:
-                                logger.info(f"Файл загружен на file.io")
-                                return fileio_link
+                for url in url_candidates:
+                    try:
+                        with open(file_path, 'rb') as f:
+                            data = aiohttp.FormData()
+                            data.add_field('file', f, filename=Path(file_path).name)
+                            async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
+                                body_text = await resp.text()
+                                if resp.status == 405:
+                                    logger.error(f"file.io ответил 405 на {url}: {body_text[:200]}")
+                                    continue
+                                if resp.status != 200:
+                                    logger.error(f"file.io ответил {resp.status} на {url}: {body_text[:500]}")
+                                    continue
+                                try:
+                                    response_json = json.loads(body_text)
+                                except Exception:
+                                    logger.error(f"file.io вернул не-JSON на {url} (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
+                                    continue
+                                if response_json.get('success'):
+                                    fileio_link = response_json.get('link')
+                                    if fileio_link:
+                                        logger.info(f"Файл загружен на file.io")
+                                        return fileio_link
+                    except Exception as e:
+                        logger.error(f"Ошибка загрузки на file.io ({url}): {e}")
         except Exception as e:
             logger.error(f"Ошибка загрузки на file.io: {e}")
     
