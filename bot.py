@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import hashlib
+import importlib.util
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
@@ -240,7 +241,6 @@ def init_cookies_from_env():
                     logger.error(f"Ошибка записи {filename}: {e}")
             except Exception as e:
                 logger.error(f"Ошибка записи {filename}: {e}")
-
     if not os.path.exists("cookies_youtube.txt"):
         Path("cookies_youtube.txt").touch()
         logger.info("Создан пустой файл cookies_youtube.txt")
@@ -279,8 +279,9 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
     if ytdlp_proxy:
         ydl_opts['proxy'] = ytdlp_proxy
 
-    ytdlp_impersonate = (os.getenv("YTDLP_IMPERSONATE") or "chrome:windows-10").strip()
-    if ytdlp_impersonate:
+    curl_cffi_available = importlib.util.find_spec("curl_cffi") is not None
+    ytdlp_impersonate = (os.getenv("YTDLP_IMPERSONATE") or "chrome").strip()
+    if curl_cffi_available and ytdlp_impersonate:
         ydl_opts['impersonate'] = ytdlp_impersonate
 
     ytdlp_force_ipv4 = (os.getenv("YTDLP_FORCE_IPV4") or "").strip().lower()
@@ -452,7 +453,18 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
             logger.info(f"Видео скачано через yt-dlp без куки")
             return temp_file
     except Exception as e:
-        logger.error(f"Ошибка yt-dlp (без куки): {e}")
+        if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts_no_cookies.get('impersonate'):
+            try:
+                ydl_opts_retry = dict(ydl_opts_no_cookies)
+                ydl_opts_retry.pop('impersonate', None)
+                temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                if temp_file:
+                    logger.info(f"Видео скачано через yt-dlp без куки")
+                    return temp_file
+            except Exception as e2:
+                logger.error(f"Ошибка yt-dlp (без куки): {e2}")
+        else:
+            logger.error(f"Ошибка yt-dlp (без куки): {e}")
 
     # Попытка с cookies
     ydl_opts_with_cookies = get_ydl_opts(quality, use_youtube_cookies=True)
@@ -463,7 +475,18 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                 logger.info(f"Видео скачано через yt-dlp с куки")
                 return temp_file
         except Exception as e:
-            logger.error(f"Ошибка yt-dlp (с куки): {e}")
+            if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts_with_cookies.get('impersonate'):
+                try:
+                    ydl_opts_retry = dict(ydl_opts_with_cookies)
+                    ydl_opts_retry.pop('impersonate', None)
+                    temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                    if temp_file:
+                        logger.info(f"Видео скачано через yt-dlp с куки")
+                        return temp_file
+                except Exception as e2:
+                    logger.error(f"Ошибка yt-dlp (с куки): {e2}")
+            else:
+                logger.error(f"Ошибка yt-dlp (с куки): {e}")
 
     logger.error("Обе попытки скачивания не удались")
     return None
@@ -510,10 +533,20 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
         else:
             ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
 
-        temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
-        if temp_file:
-            logger.info(f"Видео скачано через Playwright")
-            return temp_file
+        try:
+            temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
+            if temp_file:
+                logger.info(f"Видео скачано через Playwright")
+                return temp_file
+        except Exception as e:
+            if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
+                ydl_opts_retry = dict(ydl_opts)
+                ydl_opts_retry.pop('impersonate', None)
+                temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                if temp_file:
+                    logger.info(f"Видео скачано через Playwright")
+                    return temp_file
+            raise
 
     except Exception as e:
         logger.error(f"Ошибка в Playwright: {e}")
