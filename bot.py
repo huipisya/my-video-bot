@@ -709,7 +709,7 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
 
 async def upload_to_fileio(file_path: str) -> Optional[str]:
     """Загрузка на file.io"""
-    url = 'https://file.io/'
+    url = 'https://www.file.io/'
     max_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
     
@@ -720,11 +720,19 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
                 with open(file_path, 'rb') as f:
                     data = aiohttp.FormData()
                     data.add_field('file', f, filename=Path(file_path).name)
-                    async with session.post(url, data=data) as resp:
-                        if resp.status == 200:
-                            response_json = await resp.json()
-                            if response_json.get('success'):
-                                fileio_link = response_json.get('link')
+                    async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
+                        body_text = await resp.text()
+                        if resp.status != 200:
+                            logger.error(f"file.io ответил {resp.status}: {body_text[:500]}")
+                            return None
+                        try:
+                            response_json = json.loads(body_text)
+                        except Exception:
+                            logger.error(f"file.io вернул не-JSON (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
+                            return None
+                        if response_json.get('success'):
+                            fileio_link = response_json.get('link')
+                            if fileio_link:
                                 logger.info(f"Файл загружен на file.io")
                                 return fileio_link
         except Exception as e:
