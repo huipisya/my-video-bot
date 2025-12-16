@@ -269,7 +269,39 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         'no_warnings': False,
         'quiet': False,
         'merge_output_format': 'mp4' if quality.lower() != 'audio' else 'mp3',
+        'retries': 3,
+        'fragment_retries': 3,
+        'extractor_retries': 3,
+        'concurrent_fragment_downloads': 1,
     }
+
+    ytdlp_proxy = (os.getenv("YTDLP_PROXY") or "").strip()
+    if ytdlp_proxy:
+        ydl_opts['proxy'] = ytdlp_proxy
+
+    ytdlp_impersonate = (os.getenv("YTDLP_IMPERSONATE") or "chrome:windows-10").strip()
+    if ytdlp_impersonate:
+        ydl_opts['impersonate'] = ytdlp_impersonate
+
+    ytdlp_force_ipv4 = (os.getenv("YTDLP_FORCE_IPV4") or "").strip().lower()
+    if ytdlp_force_ipv4 in {"1", "true", "yes"}:
+        ydl_opts['force_ipv4'] = True
+
+    ydl_opts['http_headers'] = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.youtube.com/',
+    }
+
+    player_clients_raw = (os.getenv("YTDLP_YT_PLAYER_CLIENT") or "android,mweb").strip()
+    if player_clients_raw:
+        player_clients = [c.strip() for c in player_clients_raw.split(",") if c.strip()]
+        if player_clients:
+            ydl_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': player_clients,
+                }
+            }
     
     cookie_file = "cookies_youtube.txt"
     if use_youtube_cookies and os.path.exists(cookie_file):
