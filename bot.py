@@ -1525,7 +1525,7 @@ async def handle_link(message: Message):
         if temp_photos:
             cleanup_files(temp_photos)
 
-# ==================== ЗАПУСК БОТА ====================
+# ==================== ЗАПУСК БОТА ===================п=
 
 async def main():
     """Основная функция запуска"""
@@ -1597,7 +1597,7 @@ async def main():
             save_user_settings()
             save_users_data()
             save_referrals()
-            logger.info("Бот остановлен")
+            logger.info("Бот остановлен ")
     
     if IG_BROWSER:
         await IG_BROWSER.close()
