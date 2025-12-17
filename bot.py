@@ -942,6 +942,9 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
                     await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
             else:
                 await bot.send_message(chat_id, f"Ошибка при отправке файла.")
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    """Главное меню"""
     keyboard = [
         [KeyboardButton(text="Выбрать качество")],
         [KeyboardButton(text="Help")],
@@ -968,73 +971,6 @@ def quality_keyboard(user_id: int) -> InlineKeyboardMarkup:
                              callback_data="cancel")],
     ]
     
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def premium_required_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для премиум-функций"""
-    buttons = [
-        [InlineKeyboardButton(text="Пригласить друга", 
-                             callback_data="invite_friend")],
-        [InlineKeyboardButton(text="Назад", 
-                             callback_data="back_to_menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def referral_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура реферальной системы"""
-    user = get_or_create_user(user_id)
-    referral_link = f"https://t.me/{BOT_USERNAME}?start={user['referral_code']}"
-    
-    buttons = [
-        [InlineKeyboardButton(text="Скопировать ссылку",
-                            url=referral_link)],
-        [InlineKeyboardButton(text="Проверить приглашение",
-                            callback_data="check_referral")],
-        [InlineKeyboardButton(text="Как это работает",
-                            callback_data="how_referral_works")],
-        [InlineKeyboardButton(text="Назад",
-                            callback_data="back_to_menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def back_to_menu_keyboard() -> InlineKeyboardMarkup:
-    """Кнопка назад в меню"""
-    buttons = [[InlineKeyboardButton(text="Вернуться в главное меню", 
-                                     callback_data="back_to_menu")]]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def limit_reached_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура при достижении лимита"""
-    buttons = [
-        [InlineKeyboardButton(text="Пригласить друга", 
-                             callback_data="invite_friend")],
-        [InlineKeyboardButton(text="Написать фидбэк админу", 
-                             url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def conditions_keyboard(is_premium_user: bool) -> InlineKeyboardMarkup:
-    """Клавиатура условий использования"""
-    if is_premium_user:
-        buttons = [
-            [InlineKeyboardButton(text="Поделиться ботом", 
-                                 callback_data="share_bot")],
-            [InlineKeyboardButton(text="Дать обратную связь", 
-                                 url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
-            [InlineKeyboardButton(text="Назад", 
-                                 callback_data="back_to_menu")],
-        ]
-    else:
-        buttons = [
-            [InlineKeyboardButton(text="Получить бесплатно", 
-                                 callback_data="invite_friend")],
-            [InlineKeyboardButton(text="Проверить приглашение", 
-                                 callback_data="check_referral")],
-            [InlineKeyboardButton(text="Как это работает?", 
-                                 callback_data="how_referral_works")],
-            [InlineKeyboardButton(text="Назад в меню", 
-                                 callback_data="back_to_menu")],
-        ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
@@ -1132,6 +1068,7 @@ async def cmd_expand(message: Message):
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 # ==================== ОБРАБОТЧИКИ CALLBACK ====================
+
 @dp.callback_query(F.data == "invite_friend")
 async def process_invite_friend(callback: CallbackQuery):
     """Обработчик приглашения друга"""
@@ -1287,6 +1224,7 @@ async def handle_link(message: Message):
     url = message.text.strip()
     user_id = message.from_user.id
     chat_id = message.chat.id
+    status_message = None
     
     # Проверка на ссылку
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -1320,6 +1258,18 @@ async def handle_link(message: Message):
     quality = get_quality_setting(user_id)
     temp_file = None
     temp_photos = []
+
+    platform_titles = {
+        "youtube": "YouTube",
+        "rutube": "RuTube",
+        "tiktok": "TikTok",
+        "instagram": "Instagram",
+    }
+    try:
+        platform_title = platform_titles.get(platform, platform)
+        status_message = await message.answer(f"Скачиваю с {platform_title}...")
+    except Exception:
+        status_message = None
     
     try:
         if platform == "youtube":
@@ -1328,6 +1278,11 @@ async def handle_link(message: Message):
                 temp_file = await download_youtube_with_playwright(url, quality)
             
             if temp_file:
+                if status_message:
+                    try:
+                        await status_message.edit_text("Скачано. Отправляю...")
+                    except Exception:
+                        pass
                 await send_video_or_message(chat_id, temp_file)
                 cleanup_file(temp_file)
                 increment_downloads(user_id)
@@ -1359,6 +1314,11 @@ async def handle_link(message: Message):
         elif platform == "rutube":
             temp_file = await download_rutube(url, quality)
             if temp_file:
+                if status_message:
+                    try:
+                        await status_message.edit_text("Скачано. Отправляю...")
+                    except Exception:
+                        pass
                 await send_video_or_message(chat_id, temp_file)
                 cleanup_file(temp_file)
                 increment_downloads(user_id)
@@ -1369,6 +1329,11 @@ async def handle_link(message: Message):
             if '/photo/' in url.lower():
                 photos, description = await download_tiktok_photos(url)
                 if photos:
+                    if status_message:
+                        try:
+                            await status_message.edit_text("Скачано. Отправляю...")
+                        except Exception:
+                            pass
                     temp_photos = photos
                     media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
                     
@@ -1384,6 +1349,11 @@ async def handle_link(message: Message):
             else:
                 temp_file = await download_tiktok(url, quality)
                 if temp_file:
+                    if status_message:
+                        try:
+                            await status_message.edit_text("Скачано. Отправляю...")
+                        except Exception:
+                            pass
                     await send_video_or_message(chat_id, temp_file)
                     cleanup_file(temp_file)
                     increment_downloads(user_id)
@@ -1394,10 +1364,20 @@ async def handle_link(message: Message):
             video_path, photos, description = await download_instagram(url)
             
             if video_path:
+                if status_message:
+                    try:
+                        await status_message.edit_text("Скачано. Отправляю...")
+                    except Exception:
+                        pass
                 await send_video_or_message(chat_id, video_path)
                 cleanup_file(video_path)
                 increment_downloads(user_id)
             elif photos:
+                if status_message:
+                    try:
+                        await status_message.edit_text("Скачано. Отправляю...")
+                    except Exception:
+                        pass
                 temp_photos = photos
                 media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
                 
@@ -1422,6 +1402,11 @@ async def handle_link(message: Message):
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
+        if status_message:
+            try:
+                await status_message.delete()
+            except Exception:
+                pass
 
 # ==================== ЗАПУСК БОТА ====================
 
