@@ -797,7 +797,7 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
 async def upload_to_0x0(file_path: str) -> Optional[str]:
     url = (os.getenv('ZEROX0_URL') or 'https://0x0.st').strip()
     try:
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '1800').strip() or '1800')
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
         timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             with open(file_path, 'rb') as f:
@@ -815,7 +815,7 @@ async def upload_to_0x0(file_path: str) -> Optional[str]:
 async def upload_to_uguu(file_path: str) -> Optional[str]:
     url = (os.getenv('UGUU_URL') or 'https://uguu.se/upload').strip()
     try:
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '1800').strip() or '1800')
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
         timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             with open(file_path, 'rb') as f:
@@ -866,7 +866,7 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
         return None
 
     try:
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '1800').strip() or '1800')
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
         timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for url in url_candidates:
@@ -874,6 +874,7 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
                     with open(file_path, 'rb') as f:
                         data = aiohttp.FormData()
                         data.add_field('file', f, filename=Path(file_path).name)
+
                         async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
                             body_text = await resp.text()
                             if resp.status == 405:
@@ -906,7 +907,7 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
     
     if file_size > max_telegram_file_size:
         status_message = await bot.send_message(chat_id, "Файл большой. Загружаю на файлообменник...")
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '1800').strip() or '1800')
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
         link: Optional[str] = None
         try:
             link = await asyncio.wait_for(upload_to_0x0(file_path), timeout=upload_timeout_s)
