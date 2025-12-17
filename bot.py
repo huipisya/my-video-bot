@@ -558,6 +558,34 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
     
     return None
 
+async def download_rutube(url: str, quality: str = "720p") -> Optional[str]:
+    logger.info(f"Скачивание с RuTube (качество={quality})...")
+
+    ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
+    ydl_opts['http_headers'] = dict(ydl_opts.get('http_headers') or {})
+    ydl_opts['http_headers']['Referer'] = 'https://rutube.ru/'
+
+    try:
+        temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
+        if temp_file:
+            logger.info("Видео RuTube скачано")
+            return temp_file
+    except Exception as e:
+        if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
+            try:
+                ydl_opts_retry = dict(ydl_opts)
+                ydl_opts_retry.pop('impersonate', None)
+                temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                if temp_file:
+                    logger.info("Видео RuTube скачано")
+                    return temp_file
+            except Exception as e2:
+                logger.error(f"Ошибка yt-dlp (RuTube): {e2}")
+        else:
+            logger.error(f"Ошибка yt-dlp (RuTube): {e}")
+
+    return None
+
 async def download_tiktok(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с TikTok"""
     logger.info(f"Скачивание с TikTok...")
@@ -707,6 +735,52 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     
     return None, None, ""
 
+async def upload_to_0x0(file_path: str) -> Optional[str]:
+    url = (os.getenv('ZEROX0_URL') or 'https://0x0.st').strip()
+    try:
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('file', f, filename=Path(file_path).name)
+                async with session.post(url, data=data, headers={'Accept': 'text/plain'}) as resp:
+                    body_text = (await resp.text()).strip()
+                    if resp.status == 200 and body_text.startswith('http'):
+                        return body_text
+                    logger.error(f"0x0.st ответил {resp.status}: {body_text[:500]}")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки на 0x0.st: {e}")
+    return None
+
+async def upload_to_uguu(file_path: str) -> Optional[str]:
+    url = (os.getenv('UGUU_URL') or 'https://uguu.se/upload').strip()
+    try:
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('files[]', f, filename=Path(file_path).name)
+                async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
+                    body_text = (await resp.text()).strip()
+                    if resp.status != 200:
+                        logger.error(f"uguu ответил {resp.status}: {body_text[:500]}")
+                        return None
+                    try:
+                        payload = json.loads(body_text)
+                    except Exception:
+                        if body_text.startswith('http'):
+                            return body_text.splitlines()[0].strip()
+                        logger.error(f"uguu вернул не-JSON (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
+                        return None
+                    files = payload.get('files')
+                    if isinstance(files, list) and files:
+                        file0 = files[0]
+                        if isinstance(file0, dict):
+                            url_value = file0.get('url') or file0.get('link')
+                            if isinstance(url_value, str) and url_value.startswith('http'):
+                                return url_value
+    except Exception as e:
+        logger.error(f"Ошибка загрузки на uguu: {e}")
+    return None
+
 async def upload_to_fileio(file_path: str) -> Optional[str]:
     """Загрузка на file.io"""
     url_candidates_raw = [
@@ -719,36 +793,43 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
     file_size = os.path.getsize(file_path)
     
     if file_size > max_size:
-        logger.info(f"Файл превышает 50 MB, загружаю на file.io...")
-        try:
-            async with aiohttp.ClientSession() as session:
-                for url in url_candidates:
-                    try:
-                        with open(file_path, 'rb') as f:
-                            data = aiohttp.FormData()
-                            data.add_field('file', f, filename=Path(file_path).name)
-                            async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
-                                body_text = await resp.text()
-                                if resp.status == 405:
-                                    logger.error(f"file.io ответил 405 на {url}: {body_text[:200]}")
-                                    continue
-                                if resp.status != 200:
-                                    logger.error(f"file.io ответил {resp.status} на {url}: {body_text[:500]}")
-                                    continue
-                                try:
-                                    response_json = json.loads(body_text)
-                                except Exception:
-                                    logger.error(f"file.io вернул не-JSON на {url} (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
-                                    continue
-                                if response_json.get('success'):
-                                    fileio_link = response_json.get('link')
-                                    if fileio_link:
-                                        logger.info(f"Файл загружен на file.io")
-                                        return fileio_link
-                    except Exception as e:
-                        logger.error(f"Ошибка загрузки на file.io ({url}): {e}")
-        except Exception as e:
-            logger.error(f"Ошибка загрузки на file.io: {e}")
+        link = await upload_to_0x0(file_path)
+        if not link:
+            link = await upload_to_uguu(file_path)
+        if link:
+            return link
+        logger.error(f"Не удалось загрузить файл на 0x0.st и uguu")
+        return None
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            for url in url_candidates:
+                try:
+                    with open(file_path, 'rb') as f:
+                        data = aiohttp.FormData()
+                        data.add_field('file', f, filename=Path(file_path).name)
+                        async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
+                            body_text = await resp.text()
+                            if resp.status == 405:
+                                logger.error(f"file.io ответил 405 на {url}: {body_text[:200]}")
+                                continue
+                            if resp.status != 200:
+                                logger.error(f"file.io ответил {resp.status} на {url}: {body_text[:500]}")
+                                continue
+                            try:
+                                response_json = json.loads(body_text)
+                            except Exception:
+                                logger.error(f"file.io вернул не-JSON на {url} (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
+                                continue
+                            if response_json.get('success'):
+                                fileio_link = response_json.get('link')
+                                if fileio_link:
+                                    logger.info(f"Файл загружен на file.io")
+                                    return fileio_link
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки на file.io ({url}): {e}")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки на file.io: {e}")
     
     return None
 
@@ -758,9 +839,11 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
     file_size = os.path.getsize(file_path)
     
     if file_size > max_telegram_file_size:
-        fileio_link = await upload_to_fileio(file_path)
-        if fileio_link:
-            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {fileio_link}")
+        link = await upload_to_0x0(file_path)
+        if not link:
+            link = await upload_to_uguu(file_path)
+        if link:
+            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
         else:
             await bot.send_message(chat_id, "Не удалось загрузить файл.")
     else:
@@ -1142,6 +1225,8 @@ async def handle_link(message: Message):
     # Определение платформы
     if "youtube.com" in url or "youtu.be" in url:
         platform = "youtube"
+    elif "rutube.ru" in url:
+        platform = "rutube"
     elif "tiktok.com" in url or "vm.tiktok.com" in url or "vt.tiktok.com" in url:
         platform = "tiktok"
     elif "instagram.com" in url or "instagr.am" in url:
@@ -1149,7 +1234,7 @@ async def handle_link(message: Message):
     else:
         await message.answer(
             "Неподдерживаемая платформа.\n\n"
-            "Поддерживаются: YouTube, Instagram, TikTok."
+            "Поддерживаются: YouTube, RuTube, Instagram, TikTok."
         )
         return
     
@@ -1191,6 +1276,15 @@ async def handle_link(message: Message):
                     "• Проблемы с доступом к платформе\n"
                     "• Некорректная ссылка"
                 )
+
+        elif platform == "rutube":
+            temp_file = await download_rutube(url, quality)
+            if temp_file:
+                await send_video_or_message(chat_id, temp_file)
+                cleanup_file(temp_file)
+                increment_downloads(user_id)
+            else:
+                await message.answer("Не удалось скачать видео с RuTube.")
         
         elif platform == "tiktok":
             if '/photo/' in url.lower():
