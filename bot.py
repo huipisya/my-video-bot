@@ -223,15 +223,38 @@ def init_cookies_from_env():
         "COOKIES_BOT2": "cookies_instagram_bot2.txt",
         "COOKIES_BOT3": "cookies_instagram_bot3.txt",
     }
+
+    def _write_netscape_cookiefile(file_path: str, cookies: List[Dict[str, Any]]):
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for cookie in cookies:
+                domain = (cookie.get('domain') or '').strip()
+                name = cookie.get('name') or ''
+                value = cookie.get('value') or ''
+                if not domain or not name:
+                    continue
+                flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                path = cookie.get('path') or '/'
+                secure = 'TRUE' if cookie.get('secure') else 'FALSE'
+                expires_raw = cookie.get('expires')
+                try:
+                    expires = int(expires_raw) if expires_raw else 0
+                except Exception:
+                    expires = 0
+                f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
     
     for env_var, filename in cookie_env_to_file.items():
         cookies_json = os.getenv(env_var)
         if cookies_json:
             try:
                 cookies_data = json.loads(cookies_json)
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(cookies_data, f, ensure_ascii=False, indent=2)
-                logger.info(f"Создан {filename}")
+                if env_var == "COOKIES_YOUTUBE" and isinstance(cookies_data, list):
+                    _write_netscape_cookiefile(filename, cookies_data)
+                    logger.info(f"Создан {filename}")
+                else:
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(cookies_data, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Создан {filename}")
             except json.JSONDecodeError:
                 try:
                     with open(filename, 'w', encoding='utf-8') as f:
@@ -241,6 +264,7 @@ def init_cookies_from_env():
                     logger.error(f"Ошибка записи {filename}: {e}")
             except Exception as e:
                 logger.error(f"Ошибка записи {filename}: {e}")
+    
     if not os.path.exists("cookies_youtube.txt"):
         Path("cookies_youtube.txt").touch()
         logger.info("Создан пустой файл cookies_youtube.txt")
@@ -294,19 +318,25 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         'Referer': 'https://www.youtube.com/',
     }
 
-    player_clients_raw = (os.getenv("YTDLP_YT_PLAYER_CLIENT") or "android,mweb").strip()
+    cookie_file = "cookies_youtube.txt"
+    has_cookiefile = bool(use_youtube_cookies and os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0)
+    if has_cookiefile:
+        ydl_opts['cookiefile'] = cookie_file
+
+    player_clients_raw = (os.getenv("YTDLP_YT_PLAYER_CLIENT") or "").strip()
     if player_clients_raw:
         player_clients = [c.strip() for c in player_clients_raw.split(",") if c.strip()]
-        if player_clients:
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': player_clients,
-                }
-            }
-    
-    cookie_file = "cookies_youtube.txt"
-    if use_youtube_cookies and os.path.exists(cookie_file):
-        ydl_opts['cookiefile'] = cookie_file
+    else:
+        player_clients = ["web"]
+
+    ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
+    ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
+    ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
+
+    po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
+    if po_token_raw:
+        po_token_value = po_token_raw if "+" in po_token_raw else f"mweb.gvs+{po_token_raw}"
+        ydl_opts['extractor_args']['youtube']['po_token'] = po_token_value
     
     return ydl_opts
 
@@ -444,51 +474,52 @@ def _ydl_download_path(url: str, ydl_opts: Dict[str, Any]) -> Optional[str]:
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube"""
     logger.info(f"Скачивание с YouTube (качество={quality})...")
-    
-    # Попытка без cookies
-    ydl_opts_no_cookies = get_ydl_opts(quality, use_youtube_cookies=False)
-    try:
-        temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_no_cookies)
-        if temp_file:
-            logger.info(f"Видео скачано через yt-dlp без куки")
-            return temp_file
-    except Exception as e:
-        if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts_no_cookies.get('impersonate'):
-            try:
-                ydl_opts_retry = dict(ydl_opts_no_cookies)
-                ydl_opts_retry.pop('impersonate', None)
-                temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
-                if temp_file:
-                    logger.info(f"Видео скачано через yt-dlp без куки")
-                    return temp_file
-            except Exception as e2:
-                logger.error(f"Ошибка yt-dlp (без куки): {e2}")
-        else:
-            logger.error(f"Ошибка yt-dlp (без куки): {e}")
 
-    # Попытка с cookies
-    ydl_opts_with_cookies = get_ydl_opts(quality, use_youtube_cookies=True)
-    if ydl_opts_with_cookies.get('cookiefile'):
+    async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
+        ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
+        ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
+        ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
+        ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
+
         try:
-            temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_with_cookies)
+            return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
+        except Exception as e:
+            if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
+                try:
+                    ydl_opts_retry = dict(ydl_opts)
+                    ydl_opts_retry.pop('impersonate', None)
+                    return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                except Exception:
+                    raise
+            raise
+
+    po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
+    attempt_plan: List[Tuple[bool, List[str]]] = [
+        (False, ["web"]),
+        (False, ["tv_embedded"]),
+        (False, ["ios"]),
+    ]
+    if po_token_raw:
+        attempt_plan.append((False, ["mweb"]))
+
+    attempt_plan.extend([
+        (True, ["web"]),
+        (True, ["web_embedded"]),
+    ])
+
+    last_error: Optional[Exception] = None
+    for use_cookies, clients in attempt_plan:
+        try:
+            temp_file = await _try_ydl(use_cookies=use_cookies, player_clients=clients)
             if temp_file:
-                logger.info(f"Видео скачано через yt-dlp с куки")
+                logger.info(f"Видео скачано через yt-dlp (cookies={use_cookies}, client={','.join(clients)})")
                 return temp_file
         except Exception as e:
-            if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts_with_cookies.get('impersonate'):
-                try:
-                    ydl_opts_retry = dict(ydl_opts_with_cookies)
-                    ydl_opts_retry.pop('impersonate', None)
-                    temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
-                    if temp_file:
-                        logger.info(f"Видео скачано через yt-dlp с куки")
-                        return temp_file
-                except Exception as e2:
-                    logger.error(f"Ошибка yt-dlp (с куки): {e2}")
-            else:
-                logger.error(f"Ошибка yt-dlp (с куки): {e}")
+            last_error = e
+            logger.error(f"Ошибка yt-dlp (cookies={use_cookies}, client={','.join(clients)}): {e}")
 
-    logger.error("Обе попытки скачивания не удались")
+    if last_error:
+        logger.error(f"Скачивание YouTube не удалось: {last_error}")
     return None
 
 async def download_youtube_with_playwright(url: str, quality: str = "720p") -> Optional[str]:
@@ -519,6 +550,7 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
             with open(temp_cookies_file, 'w', encoding='utf-8') as f:
                 f.write("# Netscape HTTP Cookie File\n")
                 for cookie in cookies:
+
                     domain = cookie['domain']
                     flag = 'TRUE' if domain.startswith('.') else 'FALSE'
                     path = cookie['path']
@@ -530,6 +562,9 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
 
             ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
             ydl_opts['cookiefile'] = str(temp_cookies_file)
+            ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
+            ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
+            ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
         else:
             ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
 
