@@ -292,6 +292,8 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         'ignoreerrors': False,
         'no_warnings': False,
         'quiet': False,
+        'windowsfilenames': True,
+        'restrictfilenames': True,
         'merge_output_format': 'mp4' if quality.lower() != 'audio' else 'mp3',
         'retries': 3,
         'fragment_retries': 3,
@@ -476,50 +478,69 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube"""
     logger.info(f"Скачивание с YouTube (качество={quality})...")
 
-    async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
+    async def _try_ydl_simple(
+        *,
+        use_cookies: bool,
+        player_client: str,
+        cookies_from_browser: Optional[str] = None,
+    ) -> Optional[str]:
         ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
         ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
         ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
-        ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
+        ydl_opts['extractor_args']['youtube']['player_client'] = [player_client]
+        if cookies_from_browser:
+            ydl_opts['cookiesfrombrowser'] = cookies_from_browser
 
         try:
             return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
         except Exception as e:
             if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
-                try:
-                    ydl_opts_retry = dict(ydl_opts)
-                    ydl_opts_retry.pop('impersonate', None)
-                    return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
-                except Exception:
-                    raise
+                ydl_opts_retry = dict(ydl_opts)
+                ydl_opts_retry.pop('impersonate', None)
+                return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
             raise
 
-    po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
-    attempt_plan: List[Tuple[bool, List[str]]] = [
-        (False, ["android"]),
-        (False, ["mediaconnect"]),
-        (False, ["ios"]),
-        (False, ["tv_embedded"]),
-    ]
-    if po_token_raw:
-        attempt_plan.append((False, ["mweb"]))
-
-    attempt_plan.extend([
-        (True, ["android"]),
-        (True, ["web"]),
-        (True, ["ios"]),
-    ])
-
     last_error: Optional[Exception] = None
-    for use_cookies, clients in attempt_plan:
+
+    cookie_file = "cookies_youtube.txt"
+    has_cookiefile = bool(os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0)
+    if has_cookiefile:
         try:
-            temp_file = await _try_ydl(use_cookies=use_cookies, player_clients=clients)
+            temp_file = await _try_ydl_simple(use_cookies=True, player_client="web")
             if temp_file:
-                logger.info(f"Видео скачано через yt-dlp (cookies={use_cookies}, client={','.join(clients)})")
+                logger.info("Видео скачано через yt-dlp (cookiefile)")
                 return temp_file
         except Exception as e:
             last_error = e
-            logger.error(f"Ошибка yt-dlp (cookies={use_cookies}, client={','.join(clients)}): {e}")
+            logger.error(f"Ошибка yt-dlp (cookiefile): {e}")
+            if "cookies are no longer valid" in str(e).lower() or "sign in to confirm" in str(e).lower():
+                logger.warning("YouTube требует валидные cookies/авторизацию. Обновите cookies_youtube.txt или включите cookies-from-browser.")
+
+    cookies_from_browser = (os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "").strip()
+    if cookies_from_browser:
+        try:
+            temp_file = await _try_ydl_simple(use_cookies=False, player_client="web", cookies_from_browser=cookies_from_browser)
+            if temp_file:
+                logger.info(f"Видео скачано через yt-dlp (cookies-from-browser={cookies_from_browser})")
+                return temp_file
+        except Exception as e:
+            last_error = e
+            logger.error(f"Ошибка yt-dlp (cookies-from-browser={cookies_from_browser}): {e}")
+
+    player_clients = ["android", "web"]
+    po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
+    if po_token_raw:
+        player_clients = ["mweb"] + player_clients
+
+    for player_client in player_clients:
+        try:
+            temp_file = await _try_ydl_simple(use_cookies=False, player_client=player_client)
+            if temp_file:
+                logger.info(f"Видео скачано через yt-dlp (no cookies, client={player_client})")
+                return temp_file
+        except Exception as e:
+            last_error = e
+            logger.error(f"Ошибка yt-dlp (no cookies, client={player_client}): {e}")
 
     if last_error:
         logger.error(f"Скачивание YouTube не удалось: {last_error}")
