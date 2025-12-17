@@ -273,13 +273,6 @@ def init_cookies_from_env():
 
 def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dict[str, Any]:
     """Формирует опции для yt_dlp"""
-    # #region agent log
-    import json
-    try:
-        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bot.py:274","message":"get_ydl_opts entry","data":{"quality":quality,"use_youtube_cookies":use_youtube_cookies},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    except: pass
-    # #endregion
     quality_formats = {
         'best': 'bestvideo+bestaudio/best',
         '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
@@ -326,15 +319,7 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
     }
 
     cookie_file = "cookies_youtube.txt"
-    cookie_exists = os.path.exists(cookie_file)
-    cookie_size = os.path.getsize(cookie_file) if cookie_exists else 0
-    has_cookiefile = bool(use_youtube_cookies and cookie_exists and cookie_size > 0)
-    # #region agent log
-    try:
-        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bot.py:322","message":"cookie file check","data":{"cookie_file":cookie_file,"cookie_exists":cookie_exists,"cookie_size":cookie_size,"has_cookiefile":has_cookiefile},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    except: pass
-    # #endregion
+    has_cookiefile = bool(use_youtube_cookies and os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0)
     if has_cookiefile:
         ydl_opts['cookiefile'] = cookie_file
 
@@ -488,62 +473,23 @@ def _ydl_download_path(url: str, ydl_opts: Dict[str, Any]) -> Optional[str]:
 
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube"""
-    # #region agent log
-    import json
-    try:
-        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:474","message":"download_youtube entry","data":{"url":url,"quality":quality},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    except: pass
-    # #endregion
     logger.info(f"Скачивание с YouTube (качество={quality})...")
 
     async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
-        # #region agent log
-        try:
-            with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:478","message":"_try_ydl attempt start","data":{"use_cookies":use_cookies,"player_clients":player_clients},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        except: pass
-        # #endregion
         ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
         ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
         ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
         ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
 
         try:
-            result = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
-            # #region agent log
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:485","message":"_try_ydl success","data":{"use_cookies":use_cookies,"player_clients":player_clients,"result":str(result)[:100] if result else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
-            return result
+            return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
         except Exception as e:
-            # #region agent log
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bot.py:486","message":"_try_ydl exception","data":{"use_cookies":use_cookies,"player_clients":player_clients,"error_type":type(e).__name__,"error_msg":str(e)[:500]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
             if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
                 try:
                     ydl_opts_retry = dict(ydl_opts)
                     ydl_opts_retry.pop('impersonate', None)
-                    result = await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
-                    # #region agent log
-                    try:
-                        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:491","message":"_try_ydl retry success","data":{"use_cookies":use_cookies,"player_clients":player_clients,"result":str(result)[:100] if result else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                    except: pass
-                    # #endregion
-                    return result
-                except Exception as e2:
-                    # #region agent log
-                    try:
-                        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bot.py:492","message":"_try_ydl retry failed","data":{"use_cookies":use_cookies,"player_clients":player_clients,"error_type":type(e2).__name__,"error_msg":str(e2)[:500]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                    except: pass
-                    # #endregion
+                    return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                except Exception:
                     raise
             raise
 
@@ -560,31 +506,13 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         (True, ["web"]),
         (True, ["web_embedded"]),
     ])
-    # #region agent log
-    try:
-        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:510","message":"attempt_plan created","data":{"attempt_plan":[[str(uc),str(cl)] for uc,cl in attempt_plan]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    except: pass
-    # #endregion
 
     last_error: Optional[Exception] = None
-    for idx, (use_cookies, clients) in enumerate(attempt_plan):
-        # #region agent log
-        try:
-            with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:512","message":"attempt loop iteration","data":{"attempt_num":idx+1,"total":len(attempt_plan),"use_cookies":use_cookies,"clients":clients},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        except: pass
-        # #endregion
+    for use_cookies, clients in attempt_plan:
         try:
             temp_file = await _try_ydl(use_cookies=use_cookies, player_clients=clients)
             if temp_file:
                 logger.info(f"Видео скачано через yt-dlp (cookies={use_cookies}, client={','.join(clients)})")
-                # #region agent log
-                try:
-                    with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:515","message":"download_youtube success","data":{"use_cookies":use_cookies,"clients":clients,"file":str(temp_file)[:100]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                except: pass
-                # #endregion
                 return temp_file
         except Exception as e:
             last_error = e
@@ -592,31 +520,12 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
 
     if last_error:
         logger.error(f"Скачивание YouTube не удалось: {last_error}")
-        # #region agent log
-        try:
-            with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:522","message":"download_youtube all attempts failed","data":{"last_error_type":type(last_error).__name__,"last_error_msg":str(last_error)[:500]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        except: pass
-        # #endregion
     return None
 
 async def download_youtube_with_playwright(url: str, quality: str = "720p") -> Optional[str]:
     """Резервный метод через Playwright"""
-    # #region agent log
-    import json
-    try:
-        with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:525","message":"download_youtube_with_playwright entry","data":{"url":url,"quality":quality,"YT_PLAYWRIGHT_READY":YT_PLAYWRIGHT_READY,"YT_CONTEXT_exists":YT_CONTEXT is not None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    except: pass
-    # #endregion
     global YT_CONTEXT
     if not YT_PLAYWRIGHT_READY or not YT_CONTEXT:
-        # #region agent log
-        try:
-            with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:528","message":"playwright not ready","data":{"YT_PLAYWRIGHT_READY":YT_PLAYWRIGHT_READY,"YT_CONTEXT_exists":YT_CONTEXT is not None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        except: pass
-        # #endregion
         return None
 
     logger.info(f"Скачивание через Playwright (качество={quality})...")
@@ -636,12 +545,6 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
                 pass
 
         cookies = await YT_CONTEXT.cookies()
-        # #region agent log
-        try:
-            with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:547","message":"playwright cookies retrieved","data":{"cookie_count":len(cookies) if cookies else 0},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        except: pass
-        # #endregion
         if cookies:
             temp_cookies_file = Path(tempfile.mktemp(suffix='.txt'))
             with open(temp_cookies_file, 'w', encoding='utf-8') as f:
@@ -662,39 +565,15 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
             ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
             ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
             ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
-            # #region agent log
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:567","message":"playwright using temp cookies","data":{"temp_cookies_file":str(temp_cookies_file)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
         else:
             ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
-            # #region agent log
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:569","message":"playwright no cookies available","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
 
         try:
             temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
             if temp_file:
                 logger.info(f"Видео скачано через Playwright")
-                # #region agent log
-                try:
-                    with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:574","message":"playwright download success","data":{"file":str(temp_file)[:100]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                except: pass
-                # #endregion
                 return temp_file
         except Exception as e:
-            # #region agent log
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:576","message":"playwright download exception","data":{"error_type":type(e).__name__,"error_msg":str(e)[:500]},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
             if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
                 ydl_opts_retry = dict(ydl_opts)
                 ydl_opts_retry.pop('impersonate', None)
@@ -1400,34 +1279,9 @@ async def handle_link(message: Message):
     
     try:
         if platform == "youtube":
-            # #region agent log
-            import json
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:1281","message":"youtube download attempt","data":{"url":url,"quality":quality},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
             temp_file = await download_youtube(url, quality)
-            # #region agent log
-            try:
-                with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bot.py:1283","message":"youtube download result","data":{"temp_file":str(temp_file)[:100] if temp_file else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
             if not temp_file:
-                # #region agent log
-                try:
-                    with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:1284","message":"falling back to playwright","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                except: pass
-                # #endregion
                 temp_file = await download_youtube_with_playwright(url, quality)
-                # #region agent log
-                try:
-                    with open('c:\\vid\\.cursor\\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bot.py:1284","message":"playwright fallback result","data":{"temp_file":str(temp_file)[:100] if temp_file else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                except: pass
-                # #endregion
             
             if temp_file:
                 await send_video_or_message(chat_id, temp_file)
@@ -1525,7 +1379,7 @@ async def handle_link(message: Message):
         if temp_photos:
             cleanup_files(temp_photos)
 
-# ==================== ЗАПУСК БОТА ===================п=
+# ==================== ЗАПУСК БОТА ====================
 
 async def main():
     """Основная функция запуска"""
@@ -1597,7 +1451,7 @@ async def main():
             save_user_settings()
             save_users_data()
             save_referrals()
-            logger.info("Бот остановлен ")
+            logger.info("Бот остановлен")
     
     if IG_BROWSER:
         await IG_BROWSER.close()
