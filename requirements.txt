@@ -3,4 +3,4 @@ python-dotenv==1.0.1
 yt-dlp==2025.9.26
 playwright
 #KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKбля
-yt_dlp
+curl-cffi==0.7.4
