@@ -797,7 +797,9 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
 async def upload_to_0x0(file_path: str) -> Optional[str]:
     url = (os.getenv('ZEROX0_URL') or 'https://0x0.st').strip()
     try:
-        async with aiohttp.ClientSession() as session:
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
+        timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file', f, filename=Path(file_path).name)
@@ -813,7 +815,9 @@ async def upload_to_0x0(file_path: str) -> Optional[str]:
 async def upload_to_uguu(file_path: str) -> Optional[str]:
     url = (os.getenv('UGUU_URL') or 'https://uguu.se/upload').strip()
     try:
-        async with aiohttp.ClientSession() as session:
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
+        timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('files[]', f, filename=Path(file_path).name)
@@ -847,6 +851,7 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
         'https://file.io/',
         'https://www.file.io/',
     ]
+
     url_candidates = [u for u in url_candidates_raw if u]
     max_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
@@ -861,12 +866,15 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
         return None
 
     try:
-        async with aiohttp.ClientSession() as session:
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
+        timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             for url in url_candidates:
                 try:
                     with open(file_path, 'rb') as f:
                         data = aiohttp.FormData()
                         data.add_field('file', f, filename=Path(file_path).name)
+
                         async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
                             body_text = await resp.text()
                             if resp.status == 405:
@@ -898,13 +906,30 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
     file_size = os.path.getsize(file_path)
     
     if file_size > max_telegram_file_size:
-        link = await upload_to_0x0(file_path)
+        status_message = await bot.send_message(chat_id, "Файл большой. Загружаю на файлообменник...")
+        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
+        link: Optional[str] = None
+        try:
+            link = await asyncio.wait_for(upload_to_0x0(file_path), timeout=upload_timeout_s)
+        except Exception as e:
+            logger.error(f"Ошибка/таймаут загрузки на 0x0.st: {e}")
+
         if not link:
-            link = await upload_to_uguu(file_path)
+            try:
+                link = await asyncio.wait_for(upload_to_uguu(file_path), timeout=upload_timeout_s)
+            except Exception as e:
+                logger.error(f"Ошибка/таймаут загрузки на uguu: {e}")
+
         if link:
-            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
+            try:
+                await status_message.edit_text(f"Файл слишком большой для Telegram.\nСсылка: {link}")
+            except Exception:
+                await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
         else:
-            await bot.send_message(chat_id, "Не удалось загрузить файл.")
+            try:
+                await status_message.edit_text("Не удалось загрузить файл на файлообменник.")
+            except Exception:
+                await bot.send_message(chat_id, "Не удалось загрузить файл на файлообменник.")
     else:
         input_file = FSInputFile(file_path)
         try:
@@ -917,11 +942,6 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
                     await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
             else:
                 await bot.send_message(chat_id, f"Ошибка при отправке файла.")
-
-# ==================== КЛАВИАТУРЫ ====================
-
-def main_keyboard() -> ReplyKeyboardMarkup:
-    """Главное меню"""
     keyboard = [
         [KeyboardButton(text="Выбрать качество")],
         [KeyboardButton(text="Help")],
