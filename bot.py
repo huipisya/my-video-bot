@@ -295,7 +295,8 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         'merge_output_format': 'mp4' if quality.lower() != 'audio' else 'mp3',
         'retries': 3,
         'fragment_retries': 3,
-        'extractor_retries': 3,
+        'extractor_retries': 5,
+        'skip_unavailable_fragments': True,
         'concurrent_fragment_downloads': 1,
     }
 
@@ -495,16 +496,18 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
 
     po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
     attempt_plan: List[Tuple[bool, List[str]]] = [
-        (False, ["web"]),
-        (False, ["tv_embedded"]),
+        (False, ["android"]),
+        (False, ["mediaconnect"]),
         (False, ["ios"]),
+        (False, ["tv_embedded"]),
     ]
     if po_token_raw:
         attempt_plan.append((False, ["mweb"]))
 
     attempt_plan.extend([
+        (True, ["android"]),
         (True, ["web"]),
-        (True, ["web_embedded"]),
+        (True, ["ios"]),
     ])
 
     last_error: Optional[Exception] = None
