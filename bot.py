@@ -292,13 +292,10 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         'ignoreerrors': False,
         'no_warnings': False,
         'quiet': False,
-        'windowsfilenames': True,
-        'restrictfilenames': True,
         'merge_output_format': 'mp4' if quality.lower() != 'audio' else 'mp3',
         'retries': 3,
         'fragment_retries': 3,
-        'extractor_retries': 5,
-        'skip_unavailable_fragments': True,
+        'extractor_retries': 3,
         'concurrent_fragment_downloads': 1,
     }
 
@@ -478,69 +475,48 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube"""
     logger.info(f"Скачивание с YouTube (качество={quality})...")
 
-    async def _try_ydl_simple(
-        *,
-        use_cookies: bool,
-        player_client: str,
-        cookies_from_browser: Optional[str] = None,
-    ) -> Optional[str]:
+    async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
         ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
         ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
         ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
-        ydl_opts['extractor_args']['youtube']['player_client'] = [player_client]
-        if cookies_from_browser:
-            ydl_opts['cookiesfrombrowser'] = cookies_from_browser
+        ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
 
         try:
             return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
         except Exception as e:
             if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
-                ydl_opts_retry = dict(ydl_opts)
-                ydl_opts_retry.pop('impersonate', None)
-                return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                try:
+                    ydl_opts_retry = dict(ydl_opts)
+                    ydl_opts_retry.pop('impersonate', None)
+                    return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+                except Exception:
+                    raise
             raise
 
-    last_error: Optional[Exception] = None
-
-    cookie_file = "cookies_youtube.txt"
-    has_cookiefile = bool(os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0)
-    if has_cookiefile:
-        try:
-            temp_file = await _try_ydl_simple(use_cookies=True, player_client="web")
-            if temp_file:
-                logger.info("Видео скачано через yt-dlp (cookiefile)")
-                return temp_file
-        except Exception as e:
-            last_error = e
-            logger.error(f"Ошибка yt-dlp (cookiefile): {e}")
-            if "cookies are no longer valid" in str(e).lower() or "sign in to confirm" in str(e).lower():
-                logger.warning("YouTube требует валидные cookies/авторизацию. Обновите cookies_youtube.txt или включите cookies-from-browser.")
-
-    cookies_from_browser = (os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "").strip()
-    if cookies_from_browser:
-        try:
-            temp_file = await _try_ydl_simple(use_cookies=False, player_client="web", cookies_from_browser=cookies_from_browser)
-            if temp_file:
-                logger.info(f"Видео скачано через yt-dlp (cookies-from-browser={cookies_from_browser})")
-                return temp_file
-        except Exception as e:
-            last_error = e
-            logger.error(f"Ошибка yt-dlp (cookies-from-browser={cookies_from_browser}): {e}")
-
-    player_clients = ["android", "web"]
     po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
+    attempt_plan: List[Tuple[bool, List[str]]] = [
+        (False, ["web"]),
+        (False, ["tv_embedded"]),
+        (False, ["ios"]),
+    ]
     if po_token_raw:
-        player_clients = ["mweb"] + player_clients
+        attempt_plan.append((False, ["mweb"]))
 
-    for player_client in player_clients:
+    attempt_plan.extend([
+        (True, ["web"]),
+        (True, ["web_embedded"]),
+    ])
+
+    last_error: Optional[Exception] = None
+    for use_cookies, clients in attempt_plan:
         try:
-            temp_file = await _try_ydl_simple(use_cookies=False, player_client=player_client)
+            temp_file = await _try_ydl(use_cookies=use_cookies, player_clients=clients)
             if temp_file:
-                logger.info(f"Видео скачано через yt-dlp (no cookies, client={player_client})")
+                logger.info(f"Видео скачано через yt-dlp (cookies={use_cookies}, client={','.join(clients)})")
                 return temp_file
         except Exception as e:
             last_error = e
-            logger.error(f"Ошибка yt-dlp (no cookies, client={player_client}): {e}")
+            logger.error(f"Ошибка yt-dlp (cookies={use_cookies}, client={','.join(clients)}): {e}")
 
     if last_error:
         logger.error(f"Скачивание YouTube не удалось: {last_error}")
@@ -703,9 +679,20 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
     """Скачивание с Instagram"""
     logger.info(f"Скачивание с Instagram...")
     ydl_opts = get_ydl_opts(quality="best", use_youtube_cookies=False)
+    ydl_opts['http_headers'] = dict(ydl_opts.get('http_headers') or {})
+    ydl_opts['http_headers']['Referer'] = 'https://www.instagram.com/'
     
     try:
-        info, temp_file = await asyncio.to_thread(_ydl_download_info_and_path, url, ydl_opts)
+        try:
+            info, temp_file = await asyncio.to_thread(_ydl_download_info_and_path, url, ydl_opts)
+        except Exception as e:
+            if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
+                ydl_opts_retry = dict(ydl_opts)
+                ydl_opts_retry.pop('impersonate', None)
+                info, temp_file = await asyncio.to_thread(_ydl_download_info_and_path, url, ydl_opts_retry)
+            else:
+                raise
+
         if temp_file and isinstance(info, dict):
             logger.info(f"Медиа Instagram скачано")
             description = info.get('description', '') or info.get('title', '')
@@ -717,8 +704,8 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
                 photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
                              if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
                 if photo_files:
-                    logger.info(f"Скачано {len(photo_files)} фото из Instagram")
                     description = info.get('description', '') or info.get('title', '')
+                    logger.info(f"Скачано {len(photo_files)} фото из Instagram")
                     return None, photo_files, description
     except Exception as e:
         logger.info(f"yt-dlp не удалось, пробуем Playwright: {e}")
@@ -736,7 +723,8 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     page = None
     try:
         page = await IG_CONTEXT.new_page()
-        await page.goto(url, wait_until='networkidle')
+        await page.goto(url, wait_until='domcontentloaded')
+        await page.wait_for_timeout(1500)
 
         if "accounts/login" in page.url or "challenge" in page.url:
             logger.warning("Требуется аутентификация на Instagram")
@@ -745,46 +733,97 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         description_element = page.locator('article div._ab1k._ab1l div._aa99._aamp span')
         description = await description_element.first.text_content() if await description_element.count() > 0 else ""
 
-        video_element = page.locator('article video source')
-        if await video_element.count() > 0:
-            video_url = await video_element.first.get_attribute('src')
-            if video_url:
-                ydl_opts = {
-                    'format': 'best',
-                    'outtmpl': '%(title)s.%(ext)s',
-                    'noplaylist': True,
-                    'extractaudio': False,
-                    'nocheckcertificate': True,
-                }
-                try:
-                    temp_file = await asyncio.to_thread(_ydl_download_path, video_url, ydl_opts)
-                    if temp_file:
-                        return temp_file, None, description
-                except Exception as e:
-                    logger.error(f"Ошибка скачивания видео: {e}")
+        video_url = None
+        og_video = page.locator('meta[property="og:video:secure_url"], meta[property="og:video"]')
+        if await og_video.count() > 0:
+            video_url = await og_video.first.get_attribute('content')
 
-        photo_elements = page.locator('article img')
-        photo_count = await photo_elements.count()
-        if photo_count > 0:
-            photo_urls = []
-            for i in range(photo_count):
-                photo_url = await photo_elements.nth(i).get_attribute('src')
-                if photo_url:
-                    photo_urls.append(photo_url)
+        if not video_url:
+            video_source = page.locator('article video source')
+            if await video_source.count() > 0:
+                video_url = await video_source.first.get_attribute('src')
 
-            if photo_urls:
-                temp_dir = tempfile.mkdtemp()
-                photo_paths = []
-                async with aiohttp.ClientSession() as session:
-                    for i, photo_url in enumerate(photo_urls):
+        if not video_url:
+            video_tag = page.locator('article video')
+            if await video_tag.count() > 0:
+                video_url = await video_tag.first.get_attribute('src')
+
+        if video_url:
+            ydl_opts = {
+                'format': 'best',
+                'outtmpl': '%(title)s.%(ext)s',
+                'noplaylist': True,
+                'extractaudio': False,
+                'nocheckcertificate': True,
+            }
+            try:
+                temp_file = await asyncio.to_thread(_ydl_download_path, video_url, ydl_opts)
+                if temp_file:
+                    return temp_file, None, description
+            except Exception as e:
+                logger.error(f"Ошибка скачивания видео: {e}")
+
+        photo_urls: List[str] = []
+
+        og_image = page.locator('meta[property="og:image"]')
+        if await og_image.count() > 0:
+            og_image_url = await og_image.first.get_attribute('content')
+            if og_image_url:
+                photo_urls.append(og_image_url)
+
+        if not photo_urls:
+            photo_elements = page.locator('article img')
+            photo_count = await photo_elements.count()
+            if photo_count > 0:
+                for i in range(photo_count):
+                    photo_url = await photo_elements.nth(i).get_attribute('src')
+                    if photo_url and photo_url not in photo_urls:
+                        photo_urls.append(photo_url)
+
+        if not photo_urls:
+            ld_json_el = page.locator('script[type="application/ld+json"]')
+            if await ld_json_el.count() > 0:
+                ld_json_text = await ld_json_el.first.text_content()
+                if ld_json_text:
+                    try:
+                        payload = json.loads(ld_json_text)
+                        stack = [payload]
+                        while stack:
+                            obj = stack.pop()
+                            if isinstance(obj, dict):
+                                img = obj.get('image')
+                                if isinstance(img, str) and img.startswith('http') and img not in photo_urls:
+                                    photo_urls.append(img)
+                                elif isinstance(img, list):
+                                    for it in img:
+                                        if isinstance(it, str) and it.startswith('http') and it not in photo_urls:
+                                            photo_urls.append(it)
+                                for v in obj.values():
+                                    if isinstance(v, (dict, list)):
+                                        stack.append(v)
+                            elif isinstance(obj, list):
+                                for it in obj:
+                                    if isinstance(it, (dict, list)):
+                                        stack.append(it)
+                    except Exception:
+                        pass
+
+        if photo_urls:
+            temp_dir = tempfile.mkdtemp()
+            photo_paths = []
+            async with aiohttp.ClientSession() as session:
+                for i, photo_url in enumerate(photo_urls[:10]):
+                    try:
                         async with session.get(photo_url) as resp:
                             if resp.status == 200:
                                 photo_path = os.path.join(temp_dir, f"ig_photo_{i+1}.jpg")
                                 with open(photo_path, 'wb') as f:
                                     f.write(await resp.read())
                                 photo_paths.append(photo_path)
-                if photo_paths:
-                    return None, photo_paths, description
+                    except Exception:
+                        pass
+            if photo_paths:
+                return None, photo_paths, description
 
     except Exception as e:
         logger.error(f"Ошибка в Playwright Instagram: {e}")
@@ -797,9 +836,7 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
 async def upload_to_0x0(file_path: str) -> Optional[str]:
     url = (os.getenv('ZEROX0_URL') or 'https://0x0.st').strip()
     try:
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
-        timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession() as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file', f, filename=Path(file_path).name)
@@ -815,9 +852,7 @@ async def upload_to_0x0(file_path: str) -> Optional[str]:
 async def upload_to_uguu(file_path: str) -> Optional[str]:
     url = (os.getenv('UGUU_URL') or 'https://uguu.se/upload').strip()
     try:
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
-        timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession() as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('files[]', f, filename=Path(file_path).name)
@@ -851,7 +886,6 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
         'https://file.io/',
         'https://www.file.io/',
     ]
-
     url_candidates = [u for u in url_candidates_raw if u]
     max_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
@@ -866,15 +900,12 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
         return None
 
     try:
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
-        timeout = aiohttp.ClientTimeout(total=upload_timeout_s)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession() as session:
             for url in url_candidates:
                 try:
                     with open(file_path, 'rb') as f:
                         data = aiohttp.FormData()
                         data.add_field('file', f, filename=Path(file_path).name)
-
                         async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
                             body_text = await resp.text()
                             if resp.status == 405:
@@ -906,30 +937,13 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
     file_size = os.path.getsize(file_path)
     
     if file_size > max_telegram_file_size:
-        status_message = await bot.send_message(chat_id, "Файл большой. Загружаю на файлообменник...")
-        upload_timeout_s = int((os.getenv('FILEHOST_UPLOAD_TIMEOUT') or '600').strip() or '600')
-        link: Optional[str] = None
-        try:
-            link = await asyncio.wait_for(upload_to_0x0(file_path), timeout=upload_timeout_s)
-        except Exception as e:
-            logger.error(f"Ошибка/таймаут загрузки на 0x0.st: {e}")
-
+        link = await upload_to_0x0(file_path)
         if not link:
-            try:
-                link = await asyncio.wait_for(upload_to_uguu(file_path), timeout=upload_timeout_s)
-            except Exception as e:
-                logger.error(f"Ошибка/таймаут загрузки на uguu: {e}")
-
+            link = await upload_to_uguu(file_path)
         if link:
-            try:
-                await status_message.edit_text(f"Файл слишком большой для Telegram.\nСсылка: {link}")
-            except Exception:
-                await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
+            await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
         else:
-            try:
-                await status_message.edit_text("Не удалось загрузить файл на файлообменник.")
-            except Exception:
-                await bot.send_message(chat_id, "Не удалось загрузить файл на файлообменник.")
+            await bot.send_message(chat_id, "Не удалось загрузить файл.")
     else:
         input_file = FSInputFile(file_path)
         try:
@@ -942,6 +956,8 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
                     await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
             else:
                 await bot.send_message(chat_id, f"Ошибка при отправке файла.")
+
+# ==================== КЛАВИАТУРЫ ====================
 
 def main_keyboard() -> ReplyKeyboardMarkup:
     """Главное меню"""
@@ -971,6 +987,73 @@ def quality_keyboard(user_id: int) -> InlineKeyboardMarkup:
                              callback_data="cancel")],
     ]
     
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def premium_required_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для премиум-функций"""
+    buttons = [
+        [InlineKeyboardButton(text="Пригласить друга", 
+                             callback_data="invite_friend")],
+        [InlineKeyboardButton(text="Назад", 
+                             callback_data="back_to_menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def referral_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура реферальной системы"""
+    user = get_or_create_user(user_id)
+    referral_link = f"https://t.me/{BOT_USERNAME}?start={user['referral_code']}"
+    
+    buttons = [
+        [InlineKeyboardButton(text="Скопировать ссылку",
+                            url=referral_link)],
+        [InlineKeyboardButton(text="Проверить приглашение",
+                            callback_data="check_referral")],
+        [InlineKeyboardButton(text="Как это работает",
+                            callback_data="how_referral_works")],
+        [InlineKeyboardButton(text="Назад",
+                            callback_data="back_to_menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def back_to_menu_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка назад в меню"""
+    buttons = [[InlineKeyboardButton(text="Вернуться в главное меню", 
+                                     callback_data="back_to_menu")]]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def limit_reached_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура при достижении лимита"""
+    buttons = [
+        [InlineKeyboardButton(text="Пригласить друга", 
+                             callback_data="invite_friend")],
+        [InlineKeyboardButton(text="Написать фидбэк админу", 
+                             url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def conditions_keyboard(is_premium_user: bool) -> InlineKeyboardMarkup:
+    """Клавиатура условий использования"""
+    if is_premium_user:
+        buttons = [
+            [InlineKeyboardButton(text="Поделиться ботом", 
+                                 callback_data="share_bot")],
+            [InlineKeyboardButton(text="Дать обратную связь", 
+                                 url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
+            [InlineKeyboardButton(text="Назад", 
+                                 callback_data="back_to_menu")],
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(text="Получить бесплатно", 
+                                 callback_data="invite_friend")],
+            [InlineKeyboardButton(text="Проверить приглашение", 
+                                 callback_data="check_referral")],
+            [InlineKeyboardButton(text="Как это работает?", 
+                                 callback_data="how_referral_works")],
+            [InlineKeyboardButton(text="Назад в меню", 
+                                 callback_data="back_to_menu")],
+        ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
@@ -1068,7 +1151,6 @@ async def cmd_expand(message: Message):
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 # ==================== ОБРАБОТЧИКИ CALLBACK ====================
-
 @dp.callback_query(F.data == "invite_friend")
 async def process_invite_friend(callback: CallbackQuery):
     """Обработчик приглашения друга"""
@@ -1218,13 +1300,12 @@ async def process_how_referral_works(callback: CallbackQuery):
 
 # ==================== ОБРАБОТЧИК ССЫЛОК ====================
 
-@dp.message(F.text)
+@dp.message(F.text.startswith("http"))
 async def handle_link(message: Message):
     """Обработчик ссылок на видео"""
     url = message.text.strip()
     user_id = message.from_user.id
     chat_id = message.chat.id
-    status_message = None
     
     # Проверка на ссылку
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -1258,18 +1339,6 @@ async def handle_link(message: Message):
     quality = get_quality_setting(user_id)
     temp_file = None
     temp_photos = []
-
-    platform_titles = {
-        "youtube": "YouTube",
-        "rutube": "RuTube",
-        "tiktok": "TikTok",
-        "instagram": "Instagram",
-    }
-    try:
-        platform_title = platform_titles.get(platform, platform)
-        status_message = await message.answer(f"Скачиваю с {platform_title}...")
-    except Exception:
-        status_message = None
     
     try:
         if platform == "youtube":
@@ -1278,11 +1347,6 @@ async def handle_link(message: Message):
                 temp_file = await download_youtube_with_playwright(url, quality)
             
             if temp_file:
-                if status_message:
-                    try:
-                        await status_message.edit_text("Скачано. Отправляю...")
-                    except Exception:
-                        pass
                 await send_video_or_message(chat_id, temp_file)
                 cleanup_file(temp_file)
                 increment_downloads(user_id)
@@ -1314,11 +1378,6 @@ async def handle_link(message: Message):
         elif platform == "rutube":
             temp_file = await download_rutube(url, quality)
             if temp_file:
-                if status_message:
-                    try:
-                        await status_message.edit_text("Скачано. Отправляю...")
-                    except Exception:
-                        pass
                 await send_video_or_message(chat_id, temp_file)
                 cleanup_file(temp_file)
                 increment_downloads(user_id)
@@ -1329,11 +1388,6 @@ async def handle_link(message: Message):
             if '/photo/' in url.lower():
                 photos, description = await download_tiktok_photos(url)
                 if photos:
-                    if status_message:
-                        try:
-                            await status_message.edit_text("Скачано. Отправляю...")
-                        except Exception:
-                            pass
                     temp_photos = photos
                     media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
                     
@@ -1349,11 +1403,6 @@ async def handle_link(message: Message):
             else:
                 temp_file = await download_tiktok(url, quality)
                 if temp_file:
-                    if status_message:
-                        try:
-                            await status_message.edit_text("Скачано. Отправляю...")
-                        except Exception:
-                            pass
                     await send_video_or_message(chat_id, temp_file)
                     cleanup_file(temp_file)
                     increment_downloads(user_id)
@@ -1364,20 +1413,10 @@ async def handle_link(message: Message):
             video_path, photos, description = await download_instagram(url)
             
             if video_path:
-                if status_message:
-                    try:
-                        await status_message.edit_text("Скачано. Отправляю...")
-                    except Exception:
-                        pass
                 await send_video_or_message(chat_id, video_path)
                 cleanup_file(video_path)
                 increment_downloads(user_id)
             elif photos:
-                if status_message:
-                    try:
-                        await status_message.edit_text("Скачано. Отправляю...")
-                    except Exception:
-                        pass
                 temp_photos = photos
                 media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
                 
@@ -1402,11 +1441,6 @@ async def handle_link(message: Message):
             cleanup_file(temp_file)
         if temp_photos:
             cleanup_files(temp_photos)
-        if status_message:
-            try:
-                await status_message.delete()
-            except Exception:
-                pass
 
 # ==================== ЗАПУСК БОТА ====================
 
