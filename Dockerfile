@@ -4,31 +4,9 @@ FROM python:3.12-slim
 # Устанавливаем рабочую директорию в контейнере
 WORKDIR /app
 
-# Обновляем список пакетов
-RUN apt-get update
-
-# Устанавливаем ffmpeg
-RUN apt-get install -y --no-install-recommends ffmpeg
-
-# Устанавливаем зависимости для запуска браузеров Playwright
-# playwright install chromium требует эти пакеты
-RUN apt-get install -y \
-    chromium \
-    chromium-driver \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libgbm1 \
-    libxss1 \
-    libasound2 \
-    --no-install-recommends
-
-# Удаляем кэш пакетов для уменьшения размера образа
-RUN rm -rf /var/lib/apt/lists/*
+# Обновляем список пакетов и устанавливаем ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Копируем файл зависимостей в контейнер
 COPY requirements.txt .
@@ -37,8 +15,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Устанавливаем системные зависимости для Playwright
+RUN playwright install-deps chromium
+
 # Устанавливаем браузеры Playwright
-# playwright install chromium
 RUN playwright install chromium
 
 # Копируем исходный код бота в контейнер

@@ -1197,7 +1197,16 @@ async def process_conditions(callback: CallbackQuery):
             "Сейчас — бесплатно. На год. Просто, блядь, бесплатно."
         )
     keyboard = conditions_keyboard(is_premium_user)
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        logger.error(f"Не удалось отредактировать сообщение для conditions: {e}")
+        await bot.send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике conditions: {e}")
+        await bot.send_message(callback.from_user.id, text, reply_markup=keyboard, parse_mode="HTML")
 
 @dp.callback_query(F.data == "back_to_menu")
 async def process_back_to_menu(callback: CallbackQuery):
