@@ -748,6 +748,61 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
             if await video_tag.count() > 0:
                 video_url = await video_tag.first.get_attribute('src')
 
+        if not video_url:
+            # Ищем URL видео в JSON-LD
+            try:
+                ld_json_elements = page.locator('script[type="application/ld+json"]')
+                count = await ld_json_elements.count()
+                for i in range(count):
+                    ld_json_text = await ld_json_elements.nth(i).text_content()
+                    if not ld_json_text:
+                        continue
+                    
+                    payload = json.loads(ld_json_text)
+                    stack = [payload]
+                    found_url = None
+                    while stack:
+                        obj = stack.pop()
+                        if isinstance(obj, dict):
+                            for key in ['contentUrl', 'url', 'video']:
+                                val = obj.get(key)
+                                if isinstance(val, str) and val.startswith('http') and ('.mp4' in val or 'video' in val):
+                                    found_url = val
+                                    break
+                            if found_url:
+                                break
+                            for v in obj.values():
+                                if isinstance(v, (dict, list)):
+                                    stack.append(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                if isinstance(item, (dict, list)):
+                                    stack.append(item)
+                    if found_url:
+                        video_url = found_url
+                        logger.info(f"Найдено видео URL в JSON-LD: {video_url}")
+                        break
+            except Exception as e:
+                logger.warning(f"Ошибка парсинга JSON-LD для видео: {e}")
+
+        if not video_url:
+            # Ищем URL видео в inline script'ах, содержащих JSON
+            try:
+                import re
+                scripts = await page.locator('script[type="text/javascript"]').all()
+                for script in scripts:
+                    content = await script.text_content()
+                    if content and 'video_url' in content:
+                        # Используем регулярное выражение для извлечения URL
+                        match = re.search(r'"video_url":"(https?://[^"]+)"', content)
+                        if match:
+                            # Декодируем URL, чтобы обработать escape-последовательности типа \u0026
+                            video_url = json.loads(f'"{match.group(1)}"')
+                            logger.info(f"Найдено видео URL в inline script: {video_url}")
+                            break
+            except Exception as e:
+                logger.warning(f"Ошибка парсинга inline script для видео: {e}")
+
         if video_url:
             ydl_opts = {
                 'format': 'best',
