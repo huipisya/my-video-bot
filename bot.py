@@ -1064,6 +1064,7 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     get_or_create_user(user_id)
     
+    is_new_referral = False
     # Проверка реферального кода
     args = message.text.split()
     if len(args) > 1:
@@ -1074,13 +1075,39 @@ async def cmd_start(message: Message):
                 user = users_data[user_id]
                 if not user['referred_by']:  # Если еще не использовал реферальный код
                     user['referred_by'] = referrer_id
-                    save_users_data()
-                    logger.info(f"Пользователь {user_id} зарегистрирован по реферальной ссылке {referrer_id}")
-    
-    welcome_text = (
-        "Кидайте ссылку — пришлю файл.\n\n"
-        "Можно выбрать качество или оформить PRO."
-    )
+                    
+                    # Активируем премиум сразу
+                    referrer = users_data.get(referrer_id)
+                    if referrer and user_id not in referrer.get('referrals_completed', []):
+                        referrer.setdefault('referrals_completed', []).append(user_id)
+                        activate_premium(referrer_id)
+                        activate_premium(user_id)
+                        save_users_data()
+                        is_new_referral = True
+                        logger.info(f"Пользователь {user_id} зарегистрирован по реферальной ссылке {referrer_id}. Премиум активирован для обоих.")
+                        
+                        try:
+                            await bot.send_message(
+                                referrer_id,
+                                "Поздравляем! Ваш друг присоединился по вашей ссылке.\n"
+                                "Вам и вашему другу активирован Премиум на 1 год!"
+                            )
+                        except Exception as e:
+                            logger.error(f"Не удалось уведомить реферера {referrer_id}: {e}")
+                    else:
+                        save_users_data()
+                        logger.info(f"Пользователь {user_id} зарегистрирован по реферальной ссылке {referrer_id}.")
+
+    if is_new_referral:
+        welcome_text = (
+            "Вы присоединились по реферальной ссылке! Вам и вашему другу активирован Премиум на 1 год!\n\n"
+            "Теперь кидайте ссылку — пришлю файл."
+        )
+    else:
+        welcome_text = (
+            "Кидайте ссылку — пришлю файл.\n\n"
+            "Можно выбрать качество или оформить PRO."
+        )
     await message.answer(welcome_text, reply_markup=main_keyboard())
 
 @dp.message(F.text == "Help")
@@ -1163,7 +1190,7 @@ async def process_invite_friend(callback: CallbackQuery):
         "<b>Пригласите друга и получите Премиум на 1 год!</b>\n\n"
         "Вот ваша персональная ссылка:\n"
         f"<code>{referral_link}</code>\n\n"
-        "Как только ваш друг выполнит первое скачивание, вам и ему будет активирован Премиум."
+        "Как только ваш друг перейдет по ссылке, вам и ему будет активирован Премиум."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Скопировать ссылку", url=referral_link)],
@@ -1360,21 +1387,6 @@ async def handle_link(message: Message):
                 cleanup_file(temp_file)
                 increment_downloads(user_id)
                 
-                # Проверка реферала
-                user = users_data[user_id]
-                if user['referred_by'] and user['downloads_today'] == 1:
-                    referrer = users_data[user['referred_by']]
-                    if user_id not in referrer.get('referrals_completed', []):
-                        referrer.setdefault('referrals_completed', []).append(user_id)
-                        activate_premium(user['referred_by'])
-                        activate_premium(user_id)
-                        save_users_data()
-                        
-                        await bot.send_message(
-                            user['referred_by'],
-                            "Поздравляем! Ваш друг выполнил условия.\n"
-                            "Вам активирован Премиум на 1 год!"
-                        )
             else:
                 await message.answer(
                     "Не удалось скачать видео.\n\n"
