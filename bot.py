@@ -6,6 +6,7 @@ import os
 import tempfile
 import hashlib
 import importlib.util
+import ast
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
@@ -246,24 +247,30 @@ def init_cookies_from_env():
     for env_var, filename in cookie_env_to_file.items():
         cookies_json = os.getenv(env_var)
         if cookies_json:
+            cookies_data = None
             try:
                 cookies_data = json.loads(cookies_json)
-                if isinstance(cookies_data, list):
-                    _write_netscape_cookiefile(filename, cookies_data)
-                    logger.info(f"Создан {filename}")
-                else:
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        json.dump(cookies_data, f, ensure_ascii=False, indent=2)
-                    logger.info(f"Создан {filename}")
             except json.JSONDecodeError:
+                try:
+                    # Попытка распарсить как Python-структуру (например, если скопировано как список dict'ов)
+                    cookies_data = ast.literal_eval(cookies_json)
+                except Exception:
+                    pass
+            
+            if isinstance(cookies_data, list):
+                try:
+                    _write_netscape_cookiefile(filename, cookies_data)
+                    logger.info(f"Создан {filename} (из JSON/List)")
+                except Exception as e:
+                    logger.error(f"Ошибка записи Netscape cookies {filename}: {e}")
+            else:
+                # Если не удалось распарсить как список, пишем как есть (возможно, это уже Netscape формат)
                 try:
                     with open(filename, 'w', encoding='utf-8') as f:
                         f.write(cookies_json)
                     logger.info(f"Создан {filename} (текстовый формат)")
                 except Exception as e:
                     logger.error(f"Ошибка записи {filename}: {e}")
-            except Exception as e:
-                logger.error(f"Ошибка записи {filename}: {e}")
     
     if not os.path.exists("cookies_youtube.txt"):
         Path("cookies_youtube.txt").touch()
@@ -412,7 +419,38 @@ async def init_instagram_playwright():
                 "cookies.txt",
             ]:
                 if os.path.exists(path) and os.path.getsize(path) > 0:
+                    # Пробуем как Netscape
                     cookies_to_load = _read_netscape_cookiefile(path)
+                    if not cookies_to_load:
+                        # Пробуем как JSON (если не распарсилось выше, но записалось как текст)
+                        try:
+                            with open(path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            try:
+                                c_data = json.loads(content)
+                            except json.JSONDecodeError:
+                                try:
+                                    c_data = ast.literal_eval(content)
+                                except Exception:
+                                    c_data = None
+                            
+                            if isinstance(c_data, list):
+                                for cookie in c_data:
+                                    pw_cookie = {
+                                        'name': cookie.get('name', ''),
+                                        'value': cookie.get('value', ''),
+                                        'domain': cookie.get('domain', ''),
+                                        'path': cookie.get('path', '/'),
+                                        'expires': int(cookie.get('expires', 0)) if cookie.get('expires') else None,
+                                        'secure': bool(cookie.get('secure', False)),
+                                        'httpOnly': bool(cookie.get('httpOnly', False)),
+                                        'sameSite': 'Lax'
+                                    }
+                                    pw_cookie = {k: v for k, v in pw_cookie.items() if v is not None}
+                                    cookies_to_load.append(pw_cookie)
+                        except Exception:
+                            pass
+
                     if cookies_to_load:
                         break
 
@@ -861,6 +899,11 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         page = await IG_CONTEXT.new_page()
         await page.goto(url, wait_until='networkidle')
         await page.wait_for_timeout(2500)
+
+        page_title = await page.title()
+        logger.info(f"Page title: {page_title}")
+        if "Login" in page_title or "Вход" in page_title:
+             logger.warning("Instagram перенаправил на страницу входа")
 
         if '/share/' in (url or '').lower():
             canonical_url = None
