@@ -248,7 +248,7 @@ def init_cookies_from_env():
         if cookies_json:
             try:
                 cookies_data = json.loads(cookies_json)
-                if env_var == "COOKIES_YOUTUBE" and isinstance(cookies_data, list):
+                if isinstance(cookies_data, list):
                     _write_netscape_cookiefile(filename, cookies_data)
                     logger.info(f"Создан {filename}")
                 else:
@@ -268,6 +268,35 @@ def init_cookies_from_env():
     if not os.path.exists("cookies_youtube.txt"):
         Path("cookies_youtube.txt").touch()
         logger.info("Создан пустой файл cookies_youtube.txt")
+
+def _read_netscape_cookiefile(file_path: str) -> List[Dict[str, Any]]:
+    cookies_to_load: List[Dict[str, Any]] = []
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception:
+        return cookies_to_load
+
+    for line in lines:
+        if line.startswith('#') or not line.strip():
+            continue
+        parts = line.strip().split('\t')
+        if len(parts) < 7:
+            continue
+        domain, _flag, path, secure, expiration, name, value = parts[:7]
+        cookie = {
+            'name': name,
+            'value': value,
+            'domain': domain.lstrip('.'),
+            'path': path or '/',
+            'expires': int(expiration) if expiration.isdigit() else None,
+            'secure': secure.lower() == 'true',
+            'httpOnly': False,
+            'sameSite': 'Lax',
+        }
+        cookie = {k: v for k, v in cookie.items() if v is not None}
+        cookies_to_load.append(cookie)
+    return cookies_to_load
 
 # ==================== YT-DLP ====================
 
@@ -352,11 +381,11 @@ async def init_instagram_playwright():
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
 
+        cookies_to_load: List[Dict[str, Any]] = []
         cookies_json = os.getenv("COOKIES_INSTAGRAM") or os.getenv("COOKIES_TXT")
         if cookies_json:
             try:
                 cookies_data = json.loads(cookies_json)
-                cookies_to_load = []
                 for cookie in cookies_data:
                     pw_cookie = {
                         'name': cookie.get('name', ''),
@@ -371,6 +400,24 @@ async def init_instagram_playwright():
                     pw_cookie = {k: v for k, v in pw_cookie.items() if v is not None}
                     cookies_to_load.append(pw_cookie)
 
+            except Exception as e:
+                logger.error(f"Ошибка загрузки Instagram cookies: {e}")
+
+        if not cookies_to_load:
+            for path in [
+                "cookies_instagram_bot1.txt",
+                "cookies_instagram_bot2.txt",
+                "cookies_instagram_bot3.txt",
+                "cookies_instagram.txt",
+                "cookies.txt",
+            ]:
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    cookies_to_load = _read_netscape_cookiefile(path)
+                    if cookies_to_load:
+                        break
+
+        if cookies_to_load:
+            try:
                 await IG_CONTEXT.add_cookies(cookies_to_load)
                 logger.info(f"Загружено {len(cookies_to_load)} Instagram cookies")
             except Exception as e:
@@ -455,6 +502,17 @@ def cleanup_files(files: List[str]):
     for file_path in files:
         cleanup_file(file_path)
 
+def _is_netscape_cookiefile(file_path: str) -> bool:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip():
+                    continue
+                return len(line.strip().split('\t')) >= 7
+    except Exception:
+        return False
+    return False
+
 def _get_instagram_cookiefile() -> Optional[str]:
     candidates = [
         "cookies_instagram_bot1.txt",
@@ -465,7 +523,7 @@ def _get_instagram_cookiefile() -> Optional[str]:
     ]
     for path in candidates:
         try:
-            if os.path.exists(path) and os.path.getsize(path) > 0:
+            if os.path.exists(path) and os.path.getsize(path) > 0 and _is_netscape_cookiefile(path):
                 return path
         except Exception:
             continue
@@ -801,8 +859,32 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     page = None
     try:
         page = await IG_CONTEXT.new_page()
-        await page.goto(url, wait_until='domcontentloaded')
-        await page.wait_for_timeout(1500)
+        await page.goto(url, wait_until='networkidle')
+        await page.wait_for_timeout(2500)
+
+        if '/share/' in (url or '').lower():
+            canonical_url = None
+            try:
+                og_url = page.locator('meta[property="og:url"]')
+                if await og_url.count() > 0:
+                    canonical_url = await og_url.first.get_attribute('content')
+            except Exception:
+                canonical_url = None
+            if not canonical_url:
+                try:
+                    canonical_link = page.locator('link[rel="canonical"]')
+                    if await canonical_link.count() > 0:
+                        canonical_url = await canonical_link.first.get_attribute('href')
+                except Exception:
+                    canonical_url = None
+
+            if canonical_url:
+                canonical_url = canonical_url.strip()
+                if canonical_url.startswith('https://www.instagram.com/') and '/share/' not in canonical_url:
+                    if canonical_url != url and canonical_url != 'https://www.instagram.com/':
+                        url = canonical_url
+                        await page.goto(url, wait_until='networkidle')
+                        await page.wait_for_timeout(1500)
 
         if "accounts/login" in page.url or "challenge" in page.url:
             logger.warning("Требуется аутентификация на Instagram")
