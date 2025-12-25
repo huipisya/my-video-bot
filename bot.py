@@ -440,12 +440,62 @@ def cleanup_file(file_path: str):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
             logger.info(f"Удалён файл: {Path(file_path).name}")
+            try:
+                parent_dir = str(Path(file_path).resolve().parent)
+                temp_root = str(Path(tempfile.gettempdir()).resolve())
+                if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                    if os.path.commonpath([temp_root, parent_dir]) == temp_root:
+                        os.rmdir(parent_dir)
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Не удалось удалить {file_path}: {e}")
 
 def cleanup_files(files: List[str]):
     for file_path in files:
         cleanup_file(file_path)
+
+def _get_instagram_cookiefile() -> Optional[str]:
+    candidates = [
+        "cookies_instagram_bot1.txt",
+        "cookies_instagram_bot2.txt",
+        "cookies_instagram_bot3.txt",
+        "cookies_instagram.txt",
+        "cookies.txt",
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                return path
+        except Exception:
+            continue
+    return None
+
+def _pick_best_media_file(file_paths: List[str], exts: Tuple[str, ...]) -> Optional[str]:
+    candidates = [p for p in file_paths if os.path.isfile(p) and p.lower().endswith(exts)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: os.path.getsize(p) if os.path.exists(p) else 0)
+
+def _instagram_url_prefers_video(url: str) -> bool:
+    u = (url or "").lower()
+    return any(token in u for token in ("/reel/", "/reels/", "/tv/"))
+
+def _info_prefers_video(info: Any) -> bool:
+    if not isinstance(info, dict):
+        return False
+    if info.get('duration') or info.get('vcodec') and info.get('vcodec') != 'none':
+        return True
+    formats = info.get('formats')
+    if isinstance(formats, list):
+        for f in formats:
+            if not isinstance(f, dict):
+                continue
+            vcodec = f.get('vcodec')
+            ext = (f.get('ext') or '').lower()
+            if (isinstance(vcodec, str) and vcodec != 'none') or ext in {'mp4', 'webm', 'mkv', 'mov', 'm4v'}:
+                return True
+    return False
 
 def _ydl_extract_info(url: str, ydl_opts: Dict[str, Any]) -> Dict[str, Any]:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -678,36 +728,64 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
 async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
     """Скачивание с Instagram"""
     logger.info(f"Скачивание с Instagram...")
+    temp_dir = tempfile.mkdtemp(prefix="ig_")
     ydl_opts = get_ydl_opts(quality="best", use_youtube_cookies=False)
+    ydl_opts['format'] = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best[ext=mp4]/best'
+    ydl_opts['outtmpl'] = os.path.join(temp_dir, '%(id)s_%(autonumber)s.%(ext)s')
+    ydl_opts['noplaylist'] = False
+    ydl_opts['playlistend'] = 15
     ydl_opts['http_headers'] = dict(ydl_opts.get('http_headers') or {})
     ydl_opts['http_headers']['Referer'] = 'https://www.instagram.com/'
+    ig_cookiefile = _get_instagram_cookiefile()
+    if ig_cookiefile:
+        ydl_opts['cookiefile'] = ig_cookiefile
     
     try:
         try:
-            info, temp_file = await asyncio.to_thread(_ydl_download_info_and_path, url, ydl_opts)
+            info = await asyncio.to_thread(_ydl_extract_info, url, ydl_opts)
         except Exception as e:
             if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
                 ydl_opts_retry = dict(ydl_opts)
                 ydl_opts_retry.pop('impersonate', None)
-                info, temp_file = await asyncio.to_thread(_ydl_download_info_and_path, url, ydl_opts_retry)
+                info = await asyncio.to_thread(_ydl_extract_info, url, ydl_opts_retry)
             else:
                 raise
 
-        if temp_file and isinstance(info, dict):
-            logger.info(f"Медиа Instagram скачано")
-            description = info.get('description', '') or info.get('title', '')
-            return temp_file, None, description
-
         if isinstance(info, dict):
-            temp_dir = info.get('id')
-            if temp_dir and os.path.isdir(temp_dir):
-                photo_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) 
-                             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-                if photo_files:
-                    description = info.get('description', '') or info.get('title', '')
-                    logger.info(f"Скачано {len(photo_files)} фото из Instagram")
-                    return None, photo_files, description
+            description = info.get('description', '') or info.get('title', '')
+        else:
+            description = ""
+
+        downloaded_files = []
+        try:
+            downloaded_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
+        except Exception:
+            downloaded_files = []
+
+        video_path = _pick_best_media_file(downloaded_files, ('.mp4', '.mkv', '.webm', '.mov', '.m4v'))
+        if video_path:
+            for p in downloaded_files:
+                if p != video_path:
+                    cleanup_file(p)
+            logger.info("Медиа Instagram скачано (видео)")
+            return video_path, None, description
+
+        photo_files = [p for p in downloaded_files if os.path.isfile(p) and p.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+        if photo_files:
+            if _instagram_url_prefers_video(url) or _info_prefers_video(info):
+                cleanup_files(photo_files)
+                raise RuntimeError("Instagram: скачано изображение вместо видео")
+            logger.info(f"Медиа Instagram скачано (фото={len(photo_files)})")
+            return None, sorted(photo_files), description
     except Exception as e:
+        try:
+            if os.path.isdir(temp_dir):
+                for f in list(os.listdir(temp_dir)):
+                    cleanup_file(os.path.join(temp_dir, f))
+                if not os.listdir(temp_dir):
+                    os.rmdir(temp_dir)
+        except Exception:
+            pass
         logger.info(f"yt-dlp не удалось, пробуем Playwright: {e}")
         return await download_instagram_with_playwright(url)
 
