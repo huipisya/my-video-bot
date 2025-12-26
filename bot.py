@@ -924,9 +924,6 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
                     os.rmdir(temp_dir)
         except Exception:
             pass
-        logger.info(f"yt-dlp не удалось, пробуем Playwright: {e}")
-        return await download_instagram_with_playwright(url)
-
     return None, None, ""
 
 async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
@@ -939,13 +936,55 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     page = None
     try:
         page = await IG_CONTEXT.new_page()
+        
+        # Устанавливаем viewport мобильного устройства для лучшей совместимости
+        await page.set_viewport_size({"width": 375, "height": 667})
+        
         await page.goto(url, wait_until='networkidle')
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(3000)
 
         page_title = await page.title()
         logger.info(f"Page title: {page_title}")
-        if "Login" in page_title or "Вход" in page_title:
-             logger.warning("Instagram перенаправил на страницу входа")
+        
+        # Проверяем на страницу входа
+        if "Login" in page_title or "Вход" in page_title or "accounts/login" in page.url:
+            logger.warning("Instagram перенаправил на страницу входа, пробуем с cookies")
+            
+            # Пробуем загрузить cookies если есть
+            ig_cookiefile = _get_instagram_cookiefile()
+            if ig_cookiefile and os.path.exists(ig_cookiefile):
+                try:
+                    # Загружаем cookies из файла
+                    with open(ig_cookiefile, 'r', encoding='utf-8') as f:
+                        cookies_text = f.read()
+                    
+                    # Парсим Netscape формат cookies
+                    cookies = []
+                    for line in cookies_text.split('\n'):
+                        if line.strip() and not line.startswith('#'):
+                            parts = line.split('\t')
+                            if len(parts) >= 7:
+                                cookie = {
+                                    'name': parts[5],
+                                    'value': parts[6],
+                                    'domain': parts[0],
+                                    'path': parts[2],
+                                    'httpOnly': parts[1] == 'TRUE',
+                                    'secure': parts[3] == 'TRUE'
+                                }
+                                cookies.append(cookie)
+                    
+                    await IG_CONTEXT.add_cookies(cookies)
+                    logger.info(f"Загружено {len(cookies)} Instagram cookies")
+                    
+                    # Перезагружаем страницу с cookies
+                    await page.goto(url, wait_until='networkidle')
+                    await page.wait_for_timeout(2000)
+                    
+                    page_title = await page.title()
+                    logger.info(f"Page title после загрузки cookies: {page_title}")
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки cookies: {e}")
 
         if '/share/' in (url or '').lower():
             canonical_url = None
@@ -1167,9 +1206,12 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
                 'noplaylist': True,
                 'extractaudio': False,
                 'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'no_warnings': False,
+                'quiet': False,
                 'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Referer': 'https://www.instagram.com/'
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                    'Referer': 'https://www.instagram.com/',
                 }
             }
             try:
