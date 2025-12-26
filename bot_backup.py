@@ -7,7 +7,6 @@ import tempfile
 import hashlib
 import importlib.util
 import ast
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
@@ -925,9 +924,6 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
                     os.rmdir(temp_dir)
         except Exception:
             pass
-        # Если yt-dlp не сработал, пробуем Playwright
-        logger.info(f"yt-dlp не удалось, пробуем Playwright: {e}")
-        return await download_instagram_with_playwright(url)
     return None, None, ""
 
 async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
