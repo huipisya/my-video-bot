@@ -821,6 +821,41 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     
     return None, ""
 
+async def expand_instagram_share_url(url: str) -> Optional[str]:
+    """Развернуть Instagram share ссылку в полную URL"""
+    try:
+        import aiohttp
+        
+        # Создаем сессию с user-agent браузера
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+        
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, allow_redirects=True, timeout=10) as response:
+                # Получаем финальный URL после всех редиректов
+                final_url = str(response.url)
+                logger.info(f"Instagram share URL развернут в: {final_url}")
+                
+                # Проверяем, что это действительно Instagram URL с контентом
+                if "instagram.com" in final_url and (
+                    "/p/" in final_url or 
+                    "/reel/" in final_url or 
+                    "/tv/" in final_url
+                ):
+                    return final_url
+                else:
+                    logger.warning(f"Развернутый URL не содержит контента Instagram: {final_url}")
+                    return None
+                    
+    except Exception as e:
+        logger.error(f"Ошибка при развертывании Instagram share URL: {e}")
+        return None
+
 async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
     """Скачивание с Instagram"""
     logger.info(f"Скачивание с Instagram...")
@@ -1768,7 +1803,7 @@ async def handle_link(message: Message):
         await message.answer(text, reply_markup=limit_reached_keyboard())
         return
     
-    # Определение платформы
+    # Определение платформы и обработка share ссылок
     if "youtube.com" in url or "youtu.be" in url:
         platform = "youtube"
     elif "rutube.ru" in url:
@@ -1777,6 +1812,17 @@ async def handle_link(message: Message):
         platform = "tiktok"
     elif "instagram.com" in url or "instagr.am" in url:
         platform = "instagram"
+        # Обработка Instagram share ссылок
+        if "/share/" in url:
+            logger.info(f"Обнаружена Instagram share ссылка: {url}")
+            try:
+                # Развернуть share ссылку в полную
+                expanded_url = await expand_instagram_share_url(url)
+                if expanded_url and expanded_url != url:
+                    url = expanded_url
+                    logger.info(f"Развернутая URL: {url}")
+            except Exception as e:
+                logger.warning(f"Не удалось развернуть share ссылку: {e}")
     else:
         await message.answer(
             "Неподдерживаемая платформа.\n\n"
