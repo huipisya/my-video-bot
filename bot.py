@@ -870,9 +870,16 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
         if photo_files:
             if _instagram_url_prefers_video(url) or _info_prefers_video(info):
                 cleanup_files(photo_files)
-                raise RuntimeError("Instagram: скачано изображение вместо видео")
+                raise RuntimeError(f"Instagram: скачано изображение вместо видео (URL: {url})")
             logger.info(f"Медиа Instagram скачано (фото={len(photo_files)})")
             return None, sorted(photo_files), description
+        
+        # If we expected video but got nothing, provide more detailed error
+        if _instagram_url_prefers_video(url):
+            logger.error(f"Instagram: не удалось скачать видео с {url} - возможно, требуется аутентификация или контент недоступен")
+            raise RuntimeError(f"Instagram: видео недоступно - может потребоваться вход в аккаунт или контент ограничен")
+        
+        return None, None, description
     except Exception as e:
         try:
             if os.path.isdir(temp_dir):
@@ -929,159 +936,306 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
                         await page.goto(url, wait_until='networkidle')
                         await page.wait_for_timeout(1500)
 
+        # Enhanced authentication and page state checking
         if "accounts/login" in page.url or "challenge" in page.url:
             logger.warning("Требуется аутентификация на Instagram")
-            return None, None, ""
+            # Try to handle login/challenge pages
+            try:
+                # Check if there's a way to bypass or get content anyway
+                await page.wait_for_timeout(3000)
+                # If still on login page, we can't proceed
+                if "accounts/login" in page.url or "challenge" in page.url:
+                    return None, None, ""
+            except Exception:
+                return None, None, ""
+
+        # Add debug information about page state
+        page_title = await page.title()
+        logger.info(f"Page title: {page_title}")
+        logger.info(f"Final URL: {page.url}")
+        
+        if "Login" in page_title or "Вход" in page_title:
+            logger.warning("Instagram redirected to login page")
 
         description_element = page.locator('article div._ab1k._ab1l div._aa99._aamp span')
         description = await description_element.first.text_content() if await description_element.count() > 0 else ""
 
+        # Enhanced video detection with multiple methods
         video_url = None
-        og_video = page.locator('meta[property="og:video:secure_url"], meta[property="og:video"]')
+        
+        # Method 1: Check og:video meta tags
+        og_video = page.locator('meta[property="og:video:secure_url"], meta[property="og:video"], meta[name="og:video"]')
         if await og_video.count() > 0:
             video_url = await og_video.first.get_attribute('content')
+            if video_url:
+                logger.info(f"Found video URL in og:video meta: {video_url}")
 
+        # Method 2: Check video elements with various selectors
         if not video_url:
-            video_source = page.locator('article video source')
-            if await video_source.count() > 0:
-                video_url = await video_source.first.get_attribute('src')
+            video_selectors = [
+                'article video source[src*="mp4"]',
+                'article video source[src*="video"]', 
+                'article video[src*="mp4"]',
+                'article video[src*="video"]',
+                'video source[src*="mp4"]',
+                'video source[src*="video"]',
+                'video[src*="mp4"]',
+                'video[src*="video"]'
+            ]
+            
+            for selector in video_selectors:
+                try:
+                    video_element = page.locator(selector)
+                    if await video_element.count() > 0:
+                        video_url = await video_element.first.get_attribute('src')
+                        if video_url:
+                            logger.info(f"Found video URL with selector '{selector}': {video_url}")
+                            break
+                except Exception as e:
+                    logger.debug(f"Selector '{selector}' failed: {e}")
+                    continue
 
+        # Method 3: Enhanced JSON-LD parsing for video content
         if not video_url:
-            video_tag = page.locator('article video')
-            if await video_tag.count() > 0:
-                video_url = await video_tag.first.get_attribute('src')
-
-        if not video_url:
-            # Ищем URL видео в JSON-LD
             try:
                 ld_json_elements = page.locator('script[type="application/ld+json"]')
                 count = await ld_json_elements.count()
+                logger.info(f"Found {count} JSON-LD script elements")
+                
                 for i in range(count):
-                    ld_json_text = await ld_json_elements.nth(i).text_content()
-                    if not ld_json_text:
-                        continue
-                    
-                    payload = json.loads(ld_json_text)
-                    stack = [payload]
-                    found_url = None
-                    while stack:
-                        obj = stack.pop()
-                        if isinstance(obj, dict):
-                            for key in ['contentUrl', 'url', 'video']:
-                                val = obj.get(key)
-                                if isinstance(val, str) and val.startswith('http') and ('.mp4' in val or 'video' in val):
-                                    found_url = val
+                    try:
+                        ld_json_text = await ld_json_elements.nth(i).text_content()
+                        if not ld_json_text:
+                            continue
+                        
+                        payload = json.loads(ld_json_text)
+                        stack = [payload]
+                        found_url = None
+                        
+                        while stack:
+                            obj = stack.pop()
+                            if isinstance(obj, dict):
+                                # Check for various video URL fields
+                                for key in ['contentUrl', 'url', 'video', 'embedUrl', 'thumbnailUrl']:
+                                    val = obj.get(key)
+                                    if isinstance(val, str) and val.startswith('http'):
+                                        # Prioritize actual video URLs over thumbnails
+                                        if ('.mp4' in val or '.webm' in val or '.mov' in val or 'video' in val) and key != 'thumbnailUrl':
+                                            found_url = val
+                                            logger.info(f"Found video URL in JSON-LD ({key}): {found_url}")
+                                            break
+                                        elif not found_url and key == 'thumbnailUrl':  # fallback to thumbnail if no video found
+                                            found_url = val
+                                            logger.info(f"Found thumbnail URL in JSON-LD as fallback: {found_url}")
+                                
+                                if found_url and ('video' in found_url or '.mp4' in found_url):
                                     break
-                            if found_url:
-                                break
-                            for v in obj.values():
-                                if isinstance(v, (dict, list)):
-                                    stack.append(v)
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                if isinstance(item, (dict, list)):
-                                    stack.append(item)
-                    if found_url:
-                        video_url = found_url
-                        logger.info(f"Найдено видео URL в JSON-LD: {video_url}")
-                        break
+                                    
+                                for v in obj.values():
+                                    if isinstance(v, (dict, list)):
+                                        stack.append(v)
+                            elif isinstance(obj, list):
+                                for item in obj:
+                                    if isinstance(item, (dict, list)):
+                                        stack.append(item)
+                        
+                        if found_url and ('video' in found_url or '.mp4' in found_url):
+                            video_url = found_url
+                            break
+                    except Exception as e:
+                        logger.warning(f"Error parsing JSON-LD element {i}: {e}")
+                        continue
             except Exception as e:
-                logger.warning(f"Ошибка парсинга JSON-LD для видео: {e}")
+                logger.warning(f"Error in JSON-LD video detection: {e}")
 
+        # Method 4: Enhanced inline script parsing
         if not video_url:
-            # Ищем URL видео в inline script'ах, содержащих JSON
             try:
                 import re
                 scripts = await page.locator('script[type="text/javascript"]').all()
-                for script in scripts:
-                    content = await script.text_content()
-                    if content and 'video_url' in content:
-                        # Используем регулярное выражение для извлечения URL
-                        match = re.search(r'"video_url":"(https?://[^"]+)"', content)
-                        if match:
-                            # Декодируем URL, чтобы обработать escape-последовательности типа \u0026
-                            video_url = json.loads(f'"{match.group(1)}"')
-                            logger.info(f"Найдено видео URL в inline script: {video_url}")
-                            break
+                logger.info(f"Checking {len(scripts)} inline scripts for video URLs")
+                
+                for i, script in enumerate(scripts):
+                    try:
+                        content = await script.text_content()
+                        if content and any(keyword in content for keyword in ['video_url', 'videoUrl', 'video_src', 'dash_manifest']):
+                            logger.debug(f"Script {i} contains video-related keywords")
+                            
+                            # Multiple regex patterns for different video URL formats
+                            patterns = [
+                                r'"video_url"\s*:\s*"(https?://[^"]+)"',
+                                r'"videoUrl"\s*:\s*"(https?://[^"]+)"',
+                                r'"video_src"\s*:\s*"(https?://[^"]+)"',
+                                r'video_url\s*=\s*["\'](https?://[^"\']+)',
+                                r'"dash_manifest"\s*:\s*"(https?://[^"]+)"',
+                                r'"contentUrl"\s*:\s*"(https?://[^"\']+\.mp4[^"]*?)"',
+                                r'https://[^"\s]*\.mp4[^"\s]*',
+                                r'https://[^"\s]*video[^"\s]*'
+                            ]
+                            
+                            for pattern in patterns:
+                                matches = re.findall(pattern, content, re.IGNORECASE)
+                                for match in matches:
+                                    # Decode URL and validate it's a video
+                                    try:
+                                        decoded_url = json.loads(f'"{match}"')
+                                        if decoded_url.startswith('http') and any(ext in decoded_url.lower() for ext in ['.mp4', '.webm', '.mov', 'video']):
+                                            video_url = decoded_url
+                                            logger.info(f"Found video URL in script {i} with pattern '{pattern}': {video_url}")
+                                            break
+                                    except:
+                                        if match.startswith('http') and any(ext in match.lower() for ext in ['.mp4', '.webm', '.mov', 'video']):
+                                            video_url = match
+                                            logger.info(f"Found video URL in script {i} (raw): {video_url}")
+                                            break
+                                
+                                if video_url:
+                                    break
+                            
+                            if video_url:
+                                break
+                    except Exception as e:
+                        logger.debug(f"Error processing script {i}: {e}")
+                        continue
             except Exception as e:
-                logger.warning(f"Ошибка парсинга inline script для видео: {e}")
+                logger.warning(f"Error in inline script parsing: {e}")
+        
+        # Method 5: Check for video data in window.__additionalData or similar
+        if not video_url:
+            try:
+                # Try to extract from window object data
+                page_data = await page.evaluate('''() => {
+                    const data = {};
+                    if (window.__additionalData) data.additionalData = window.__additionalData;
+                    if (window.__initialData) data.initialData = window.__initialData;
+                    if (window._sharedData) data.sharedData = window._sharedData;
+                    return data;
+                }''')
+                
+                if page_data:
+                    logger.info(f"Found window data: {list(page_data.keys())}")
+                    # Search for video URLs in the page data
+                    data_str = json.dumps(page_data)
+                    import re
+                    video_matches = re.findall(r'https://[^"\s]*\.mp4[^"\s]*', data_str)
+                    if video_matches:
+                        video_url = video_matches[0]
+                        logger.info(f"Found video URL in window data: {video_url}")
+            except Exception as e:
+                logger.debug(f"Error extracting window data: {e}")
 
         if video_url:
+            logger.info(f"Attempting to download video from: {video_url}")
             ydl_opts = {
                 'format': 'best',
                 'outtmpl': '%(title)s.%(ext)s',
                 'noplaylist': True,
                 'extractaudio': False,
                 'nocheckcertificate': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://www.instagram.com/'
+                }
             }
             try:
                 temp_file = await asyncio.to_thread(_ydl_download_path, video_url, ydl_opts)
-                if temp_file:
-                    return temp_file, None, description
+                if temp_file and os.path.exists(temp_file):
+                    # Verify it's actually a video file
+                    file_ext = Path(temp_file).suffix.lower()
+                    if file_ext in ['.mp4', '.webm', '.mov', '.mkv', '.m4v']:
+                        logger.info(f"Successfully downloaded video: {temp_file}")
+                        return temp_file, None, description
+                    else:
+                        logger.warning(f"Downloaded file is not a video: {temp_file} (extension: {file_ext})")
+                        cleanup_file(temp_file)
             except Exception as e:
-                logger.error(f"Ошибка скачивания видео: {e}")
+                logger.error(f"Error downloading video: {e}")
+        else:
+            logger.warning("No video URL found with any detection method")
 
-        photo_urls: List[str] = []
+        # Only download photos if this URL doesn't indicate video content
+        # This prevents downloading preview images when videos are expected
+        url_lower = (url or "").lower()
+        should_download_photos = not any(token in url_lower for token in ("/reel/", "/reels/", "/tv/"))
+        
+        if should_download_photos:
+            logger.info("URL indicates photo content, attempting to download photos")
+            photo_urls: List[str] = []
 
-        og_image = page.locator('meta[property="og:image"]')
-        if await og_image.count() > 0:
-            og_image_url = await og_image.first.get_attribute('content')
-            if og_image_url:
-                photo_urls.append(og_image_url)
+            # Method 1: Check og:image meta tags
+            og_image = page.locator('meta[property="og:image"]')
+            if await og_image.count() > 0:
+                og_image_url = await og_image.first.get_attribute('content')
+                if og_image_url and not any(skip in og_image_url.lower() for skip in ['150x150', '50x50']):
+                    photo_urls.append(og_image_url)
+                    logger.info(f"Found og:image: {og_image_url}")
 
-        if not photo_urls:
-            photo_elements = page.locator('article img')
-            photo_count = await photo_elements.count()
-            if photo_count > 0:
-                for i in range(photo_count):
-                    photo_url = await photo_elements.nth(i).get_attribute('src')
-                    if photo_url and photo_url not in photo_urls:
-                        photo_urls.append(photo_url)
+            # Method 2: Look for actual photo elements
+            if not photo_urls:
+                photo_elements = page.locator('article img[src*="cdninstagram"]')
+                photo_count = await photo_elements.count()
+                if photo_count > 0:
+                    for i in range(min(photo_count, 10)):  # Limit to 10 photos
+                        photo_url = await photo_elements.nth(i).get_attribute('src')
+                        if photo_url and photo_url not in photo_urls and not any(skip in photo_url.lower() for skip in ['150x150', '50x50']):
+                            photo_urls.append(photo_url)
+                            logger.info(f"Found photo element {i}: {photo_url}")
 
-        if not photo_urls:
-            ld_json_el = page.locator('script[type="application/ld+json"]')
-            if await ld_json_el.count() > 0:
-                ld_json_text = await ld_json_el.first.text_content()
-                if ld_json_text:
-                    try:
-                        payload = json.loads(ld_json_text)
-                        stack = [payload]
-                        while stack:
-                            obj = stack.pop()
-                            if isinstance(obj, dict):
-                                img = obj.get('image')
-                                if isinstance(img, str) and img.startswith('http') and img not in photo_urls:
-                                    photo_urls.append(img)
-                                elif isinstance(img, list):
-                                    for it in img:
-                                        if isinstance(it, str) and it.startswith('http') and it not in photo_urls:
-                                            photo_urls.append(it)
-                                for v in obj.values():
-                                    if isinstance(v, (dict, list)):
-                                        stack.append(v)
-                            elif isinstance(obj, list):
-                                for it in obj:
-                                    if isinstance(it, (dict, list)):
-                                        stack.append(it)
-                    except Exception:
-                        pass
+            # Method 3: JSON-LD for images
+            if not photo_urls:
+                ld_json_el = page.locator('script[type="application/ld+json"]')
+                if await ld_json_el.count() > 0:
+                    ld_json_text = await ld_json_el.first.text_content()
+                    if ld_json_text:
+                        try:
+                            payload = json.loads(ld_json_text)
+                            stack = [payload]
+                            while stack:
+                                obj = stack.pop()
+                                if isinstance(obj, dict):
+                                    img = obj.get('image')
+                                    if isinstance(img, str) and img.startswith('http') and img not in photo_urls:
+                                        photo_urls.append(img)
+                                    elif isinstance(img, list):
+                                        for it in img:
+                                            if isinstance(it, str) and it.startswith('http') and it not in photo_urls:
+                                                photo_urls.append(it)
+                                    for v in obj.values():
+                                        if isinstance(v, (dict, list)):
+                                            stack.append(v)
+                                elif isinstance(obj, list):
+                                    for it in obj:
+                                        if isinstance(it, (dict, list)):
+                                            stack.append(it)
+                        except Exception:
+                            pass
 
-        if photo_urls:
-            temp_dir = tempfile.mkdtemp()
-            photo_paths = []
-            async with aiohttp.ClientSession() as session:
-                for i, photo_url in enumerate(photo_urls[:10]):
-                    try:
-                        async with session.get(photo_url) as resp:
-                            if resp.status == 200:
-                                photo_path = os.path.join(temp_dir, f"ig_photo_{i+1}.jpg")
-                                with open(photo_path, 'wb') as f:
-                                    f.write(await resp.read())
-                                photo_paths.append(photo_path)
-                    except Exception:
-                        pass
-            if photo_paths:
-                return None, photo_paths, description
+            if photo_urls:
+                logger.info(f"Attempting to download {len(photo_urls)} photos")
+                temp_dir = tempfile.mkdtemp()
+                photo_paths = []
+                async with aiohttp.ClientSession() as session:
+                    for i, photo_url in enumerate(photo_urls[:10]):
+                        try:
+                            headers = {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                'Referer': 'https://www.instagram.com/'
+                            }
+                            async with session.get(photo_url, headers=headers) as resp:
+                                if resp.status == 200:
+                                    photo_path = os.path.join(temp_dir, f"ig_photo_{i+1}.jpg")
+                                    with open(photo_path, 'wb') as f:
+                                        f.write(await resp.read())
+                                    photo_paths.append(photo_path)
+                                    logger.info(f"Downloaded photo: {photo_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to download photo {i}: {e}")
+                            continue
+                if photo_paths:
+                    logger.info(f"Successfully downloaded {len(photo_paths)} photos")
+                    return None, photo_paths, description
+        else:
+            logger.warning("URL indicates video content but no video found - not downloading preview images")
 
     except Exception as e:
         logger.error(f"Ошибка в Playwright Instagram: {e}")
