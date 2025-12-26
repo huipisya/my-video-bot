@@ -904,56 +904,37 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     page = None
     try:
         page = await IG_CONTEXT.new_page()
-        
-        # Handle Instagram share URLs that redirect to actual content
-        if '/share/' in (url or "").lower():
-            logger.info(f"Detected share URL, following redirects...")
-            try:
-                # First, let the page load and follow redirects naturally
-                await page.goto(url, wait_until='networkidle')
-                await page.wait_for_timeout(2000)
-                
-                # Check if we got redirected to the actual content
-                current_url = page.url
-                logger.info(f"After redirect, current URL: {current_url}")
-                
-                # If we're still on a share URL or on the main page, try to find the canonical URL
-                if '/share/' in current_url.lower() or current_url == 'https://www.instagram.com/':
-                    canonical_url = None
-                    try:
-                        og_url = page.locator('meta[property="og:url"]')
-                        if await og_url.count() > 0:
-                            canonical_url = await og_url.first.get_attribute('content')
-                    except Exception:
-                        pass
-                    
-                    if not canonical_url:
-                        try:
-                            canonical_link = page.locator('link[rel="canonical"]')
-                            if await canonical_link.count() > 0:
-                                canonical_url = await canonical_link.first.get_attribute('href')
-                        except Exception:
-                            pass
+        await page.goto(url, wait_until='networkidle')
+        await page.wait_for_timeout(2500)
 
-                    if canonical_url:
-                        canonical_url = canonical_url.strip()
-                        if canonical_url.startswith('https://www.instagram.com/') and '/share/' not in canonical_url:
-                            logger.info(f"Found canonical URL: {canonical_url}")
-                            url = canonical_url
-                            await page.goto(url, wait_until='networkidle')
-                            await page.wait_for_timeout(1500)
-                else:
-                    # We got redirected to the actual content URL
-                    url = current_url
-                    logger.info(f"Using redirected URL: {url}")
-                    
-            except Exception as e:
-                logger.warning(f"Error handling redirect: {e}")
-                # Continue with original URL if redirect fails
-        else:
-            # For non-share URLs, navigate normally
-            await page.goto(url, wait_until='networkidle')
-            await page.wait_for_timeout(2500)
+        page_title = await page.title()
+        logger.info(f"Page title: {page_title}")
+        if "Login" in page_title or "Вход" in page_title:
+             logger.warning("Instagram перенаправил на страницу входа")
+
+        if '/share/' in (url or '').lower():
+            canonical_url = None
+            try:
+                og_url = page.locator('meta[property="og:url"]')
+                if await og_url.count() > 0:
+                    canonical_url = await og_url.first.get_attribute('content')
+            except Exception:
+                canonical_url = None
+            if not canonical_url:
+                try:
+                    canonical_link = page.locator('link[rel="canonical"]')
+                    if await canonical_link.count() > 0:
+                        canonical_url = await canonical_link.first.get_attribute('href')
+                except Exception:
+                    canonical_url = None
+
+            if canonical_url:
+                canonical_url = canonical_url.strip()
+                if canonical_url.startswith('https://www.instagram.com/') and '/share/' not in canonical_url:
+                    if canonical_url != url and canonical_url != 'https://www.instagram.com/':
+                        url = canonical_url
+                        await page.goto(url, wait_until='networkidle')
+                        await page.wait_for_timeout(1500)
 
         # Enhanced authentication and page state checking
         if "accounts/login" in page.url or "challenge" in page.url:
