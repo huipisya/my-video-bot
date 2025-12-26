@@ -837,7 +837,7 @@ async def expand_instagram_share_url(url: str) -> Optional[str]:
         }
         
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, allow_redirects=True, timeout=10) as response:
+            async with session.get(url, allow_redirects=True, timeout=15) as response:
                 # Получаем финальный URL после всех редиректов
                 final_url = str(response.url)
                 logger.info(f"Instagram share URL развернут в: {final_url}")
@@ -846,13 +846,51 @@ async def expand_instagram_share_url(url: str) -> Optional[str]:
                 if "instagram.com" in final_url and (
                     "/p/" in final_url or 
                     "/reel/" in final_url or 
-                    "/tv/" in final_url
+                    "/tv/" in final_url or
+                    "/stories/" in final_url
                 ):
                     return final_url
                 else:
+                    # Если финальный URL не содержит контента, пробуем извлечь из HTML
+                    try:
+                        html_content = await response.text()
+                        
+                        # Ищем canonical URL
+                        import re
+                        canonical_match = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+                        if canonical_match:
+                            canonical_url = canonical_match.group(1)
+                            if "instagram.com" in canonical_url and (
+                                "/p/" in canonical_url or 
+                                "/reel/" in canonical_url or 
+                                "/tv/" in canonical_url or
+                                "/stories/" in canonical_url
+                            ):
+                                logger.info(f"Найден canonical URL: {canonical_url}")
+                                return canonical_url
+                        
+                        # Ищем og:url
+                        og_url_match = re.search(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+                        if og_url_match:
+                            og_url = og_url_match.group(1)
+                            if "instagram.com" in og_url and (
+                                "/p/" in og_url or 
+                                "/reel/" in og_url or 
+                                "/tv/" in og_url or
+                                "/stories/" in og_url
+                            ):
+                                logger.info(f"Найден og:url: {og_url}")
+                                return og_url
+                                
+                    except Exception as html_error:
+                        logger.warning(f"Ошибка при парсинге HTML: {html_error}")
+                    
                     logger.warning(f"Развернутый URL не содержит контента Instagram: {final_url}")
                     return None
                     
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при развертывании Instagram share URL: {url}")
+        return None
     except Exception as e:
         logger.error(f"Ошибка при развертывании Instagram share URL: {e}")
         return None
@@ -1858,8 +1896,8 @@ async def handle_link(message: Message):
         platform = "tiktok"
     elif "instagram.com" in url or "instagr.am" in url:
         platform = "instagram"
-        # Обработка Instagram share ссылок
-        if "/share/" in url:
+        # Обработка всех Instagram share ссылок (включая iPhone share ссылки)
+        if "/share/" in url or "instagram.com/share/" in url or url.startswith("https://www.instagram.com/share/"):
             logger.info(f"Обнаружена Instagram share ссылка: {url}")
             try:
                 # Развернуть share ссылку в полную
