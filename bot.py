@@ -969,20 +969,51 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
     return None, None, ""
 
 async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-    """Скачивание с Instagram через Playwright"""
+    """Скачивание с Instagram через Playwright с перехватом сетевых запросов"""
     global IG_CONTEXT
     if not IG_PLAYWRIGHT_READY or not IG_CONTEXT:
+        logger.warning("Instagram Playwright не инициализирован")
         return None, None, ""
 
     logger.info(f"Скачивание с Instagram через Playwright...")
     page = None
+    captured_video_urls: List[str] = []
+    
+    async def on_response(response):
+        """Перехват сетевых ответов для захвата video URL"""
+        nonlocal captured_video_urls
+        try:
+            url_str = response.url
+            content_type = response.headers.get('content-type', '')
+            
+            # Проверяем Content-Type на video
+            if 'video' in content_type.lower():
+                if url_str not in captured_video_urls:
+                    captured_video_urls.append(url_str)
+                    logger.info(f"[Network] Перехвачен video URL (Content-Type): {url_str[:100]}...")
+                return
+            
+            # Проверяем URL паттерны для Instagram видео
+            url_lower = url_str.lower()
+            if any(pattern in url_lower for pattern in ['.mp4', '/video/', 'video_dashinit']):
+                if any(domain in url_lower for domain in ['cdninstagram.com', 'fbcdn.net', 'instagram.com']):
+                    if url_str not in captured_video_urls:
+                        captured_video_urls.append(url_str)
+                        logger.info(f"[Network] Перехвачен video URL (URL pattern): {url_str[:100]}...")
+        except Exception:
+            pass
+    
     try:
         page = await IG_CONTEXT.new_page()
         
-        # Устанавливаем viewport мобильного устройства для лучшей совместимости
-        await page.set_viewport_size({"width": 375, "height": 667})
+        # Регистрируем перехват сетевых запросов ПЕРЕД переходом на страницу
+        page.on('response', on_response)
         
-        await page.goto(url, wait_until='networkidle')
+        # Устанавливаем viewport мобильного устройства для лучшей совместимости
+        await page.set_viewport_size({"width": 375, "height": 812})
+        
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+
         await page.wait_for_timeout(3000)
 
         page_title = await page.title()
@@ -1073,18 +1104,68 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         if "Login" in page_title or "Вход" in page_title:
             logger.warning("Instagram redirected to login page")
 
-        description_element = page.locator('article div._ab1k._ab1l div._aa99._aamp span')
-        description = await description_element.first.text_content() if await description_element.count() > 0 else ""
+        description_element = page.locator('article div._ab1k._ab1l div._aa99._aamp span, article div._a9zs span, meta[property="og:description"]')
+        description = ""
+        if await description_element.count() > 0:
+            first_el = description_element.first
+            if 'meta' in await first_el.evaluate('el => el.tagName.toLowerCase()'):
+                description = await first_el.get_attribute('content') or ""
+            else:
+                description = await first_el.text_content() or ""
+
+        # Пытаемся кликнуть на видео для принудительной загрузки
+        logger.info("Пытаемся активировать воспроизведение видео...")
+        try:
+            video_click_selectors = ['article video', 'video', 'div[role="button"] video']
+            for selector in video_click_selectors:
+                video_el = page.locator(selector)
+                if await video_el.count() > 0:
+                    try:
+                        await video_el.first.click(timeout=3000)
+                        logger.info(f"Клик по видео ({selector})")
+                        await page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+                    break
+        except Exception as e:
+            logger.debug(f"Ошибка при клике на видео: {e}")
+
+        # Скроллим к видео чтобы спровоцировать lazy-load
+        try:
+            await page.evaluate('window.scrollBy(0, 300)')
+            await page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        # Ждём и собираем ещё сетевые запросы
+        await page.wait_for_timeout(2000)
+        
+        logger.info(f"Собрано {len(captured_video_urls)} video URL через network interception")
 
         # Enhanced video detection with multiple methods
         video_url = None
         
-        # Method 1: Check og:video meta tags
-        og_video = page.locator('meta[property="og:video:secure_url"], meta[property="og:video"], meta[name="og:video"]')
-        if await og_video.count() > 0:
-            video_url = await og_video.first.get_attribute('content')
-            if video_url:
-                logger.info(f"Found video URL in og:video meta: {video_url}")
+        # Method 0: Используем перехваченные URL (ГЛАВНЫЙ МЕТОД - наивысший приоритет)
+        if captured_video_urls:
+            # Выбираем лучший URL (предпочитаем .mp4)
+            for url_candidate in captured_video_urls:
+                if '.mp4' in url_candidate.lower():
+                    video_url = url_candidate
+                    logger.info(f"[Method 0] Выбран video URL (.mp4): {video_url[:80]}...")
+                    break
+            if not video_url:
+                video_url = captured_video_urls[0]
+                logger.info(f"[Method 0] Выбран video URL (первый): {video_url[:80]}...")
+        
+        # Method 1: Check og:video meta tags (fallback)
+        if not video_url:
+            og_video = page.locator('meta[property="og:video:secure_url"], meta[property="og:video"], meta[name="og:video"]')
+            if await og_video.count() > 0:
+                video_url = await og_video.first.get_attribute('content')
+                if video_url:
+                    logger.info(f"[Method 1] Found video URL in og:video meta: {video_url}")
+
+
 
         # Method 2: Check video elements with various selectors
         if not video_url:
@@ -1241,7 +1322,38 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
                 logger.debug(f"Error extracting window data: {e}")
 
         if video_url:
-            logger.info(f"Attempting to download video from: {video_url}")
+            logger.info(f"Скачиваем видео: {video_url[:80]}...")
+            
+            # Сначала пробуем скачать напрямую через aiohttp (более надёжно)
+            try:
+                import aiohttp
+                temp_dir = tempfile.mkdtemp(prefix="ig_video_")
+                temp_file = os.path.join(temp_dir, "instagram_video.mp4")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                    'Referer': 'https://www.instagram.com/',
+                    'Accept': '*/*',
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(video_url, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status == 200:
+                            content = await resp.read()
+                            if len(content) > 10000:  # Минимум 10KB
+                                with open(temp_file, 'wb') as f:
+                                    f.write(content)
+                                logger.info(f"Видео скачано через aiohttp: {temp_file} ({len(content)} bytes)")
+                                return temp_file, None, description
+                            else:
+                                logger.warning(f"Скачанный файл слишком маленький: {len(content)} bytes")
+                        else:
+                            logger.warning(f"Ошибка скачивания видео через aiohttp: HTTP {resp.status}")
+            except Exception as e:
+                logger.warning(f"Ошибка aiohttp скачивания: {e}")
+            
+            # Fallback к yt-dlp
+            logger.info("Пробуем скачать через yt-dlp...")
             ydl_opts = {
                 'format': 'best',
                 'outtmpl': '%(title)s.%(ext)s',
@@ -1259,18 +1371,18 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
             try:
                 temp_file = await asyncio.to_thread(_ydl_download_path, video_url, ydl_opts)
                 if temp_file and os.path.exists(temp_file):
-                    # Verify it's actually a video file
                     file_ext = Path(temp_file).suffix.lower()
                     if file_ext in ['.mp4', '.webm', '.mov', '.mkv', '.m4v']:
-                        logger.info(f"Successfully downloaded video: {temp_file}")
+                        logger.info(f"Видео скачано через yt-dlp: {temp_file}")
                         return temp_file, None, description
                     else:
-                        logger.warning(f"Downloaded file is not a video: {temp_file} (extension: {file_ext})")
+                        logger.warning(f"Скаченный файл не видео: {temp_file} ({file_ext})")
                         cleanup_file(temp_file)
             except Exception as e:
-                logger.error(f"Error downloading video: {e}")
+                logger.error(f"Ошибка yt-dlp скачивания: {e}")
         else:
-            logger.warning("No video URL found with any detection method")
+            logger.warning("Не найден video URL ни одним методом")
+
 
         # Only download photos if this URL doesn't indicate video content
         # This prevents downloading preview images when videos are expected
