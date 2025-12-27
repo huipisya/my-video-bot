@@ -948,10 +948,10 @@ async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str
             logger.info(f"Медиа Instagram скачано (фото={len(photo_files)})")
             return None, sorted(photo_files), description
         
-        # If we expected video but got nothing, provide more detailed error
+        # Если ожидали видео но ничего не скачано - пробуем Playwright
         if _instagram_url_prefers_video(url):
-            logger.error(f"Instagram: не удалось скачать видео с {url} - возможно, требуется аутентификация или контент недоступен")
-            raise RuntimeError(f"Instagram: видео недоступно - может потребоваться вход в аккаунт или контент ограничен")
+            logger.warning(f"yt-dlp не скачал видео, пробуем Playwright...")
+            return await download_instagram_with_playwright(url)
         
         return None, None, description
     except Exception as e:
