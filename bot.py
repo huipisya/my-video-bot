@@ -1549,6 +1549,148 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         if page:
             await page.close()
     
+    # Финальный fallback - попробуем через сторонние сервисы
+    logger.info("Playwright не смог скачать, пробуем через сторонние сервисы...")
+    return await download_instagram_via_external_api(url)
+
+
+async def download_instagram_via_external_api(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+    """Скачивание Instagram через сторонние API сервисы"""
+    import re
+    import aiohttp
+    
+    # Извлекаем shortcode из URL
+    shortcode_match = re.search(r'/(p|reel|tv)/([A-Za-z0-9_-]+)', url)
+    if not shortcode_match:
+        logger.warning("Не удалось извлечь shortcode из URL")
+        return None, None, ""
+    
+    shortcode = shortcode_match.group(2)
+    logger.info(f"Пробуем скачать через внешние API (shortcode: {shortcode})...")
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    
+    # Метод 1: Instagram Embed страница
+    try:
+        embed_url = f"https://www.instagram.com/p/{shortcode}/embed/"
+        logger.info(f"Пробуем embed страницу: {embed_url}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    
+                    # Ищем video URL в embed странице
+                    video_patterns = [
+                        r'"video_url"\s*:\s*"([^"]+)"',
+                        r'"contentUrl"\s*:\s*"([^"]+)"',
+                        r'<video[^>]+src="([^"]+)"',
+                        r'property="og:video"\s+content="([^"]+)"',
+                        r'https://[^"\s]+\.mp4[^"\s]*',
+                    ]
+                    
+                    for pattern in video_patterns:
+                        matches = re.findall(pattern, html)
+                        for match in matches:
+                            video_url = match.replace('\\u0026', '&').replace('\\/', '/')
+                            if video_url.startswith('http') and ('mp4' in video_url.lower() or 'video' in video_url.lower()):
+                                logger.info(f"Найден video URL в embed: {video_url[:80]}...")
+                                
+                                # Скачиваем видео
+                                try:
+                                    async with session.get(video_url, headers={'Referer': 'https://www.instagram.com/'}, timeout=aiohttp.ClientTimeout(total=60)) as video_resp:
+                                        if video_resp.status == 200:
+                                            content = await video_resp.read()
+                                            if len(content) > 10000:
+                                                temp_dir = tempfile.mkdtemp(prefix="ig_api_")
+                                                temp_file = os.path.join(temp_dir, "instagram_video.mp4")
+                                                with open(temp_file, 'wb') as f:
+                                                    f.write(content)
+                                                logger.info(f"Видео скачано через embed: {temp_file} ({len(content)} bytes)")
+                                                return temp_file, None, ""
+                                except Exception as e:
+                                    logger.warning(f"Ошибка скачивания из embed: {e}")
+                    
+                    logger.warning("Video URL не найден в embed странице")
+    except Exception as e:
+        logger.warning(f"Ошибка embed метода: {e}")
+    
+    # Метод 2: Попробуем через ddinstagram (публичный прокси)
+    try:
+        dd_url = url.replace('instagram.com', 'ddinstagram.com')
+        logger.info(f"Пробуем ddinstagram: {dd_url}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(dd_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    
+                    # Ищем прямые ссылки на видео
+                    video_matches = re.findall(r'https://[^"\s]+(?:\.mp4|/video/)[^"\s]*', html)
+                    for video_url in video_matches:
+                        if 'ddinstagram' not in video_url and 'cdninstagram' in video_url:
+                            logger.info(f"Найден video URL через ddinstagram: {video_url[:80]}...")
+                            
+                            try:
+                                async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=60)) as video_resp:
+                                    if video_resp.status == 200:
+                                        content = await video_resp.read()
+                                        if len(content) > 10000:
+                                            temp_dir = tempfile.mkdtemp(prefix="ig_dd_")
+                                            temp_file = os.path.join(temp_dir, "instagram_video.mp4")
+                                            with open(temp_file, 'wb') as f:
+                                                f.write(content)
+                                            logger.info(f"Видео скачано через ddinstagram: {temp_file}")
+                                            return temp_file, None, ""
+                            except Exception:
+                                pass
+    except Exception as e:
+        logger.warning(f"Ошибка ddinstagram метода: {e}")
+    
+    # Метод 3: Попробуем через Instagram GraphQL API (иногда работает без авторизации)
+    try:
+        graphql_url = f"https://www.instagram.com/graphql/query/"
+        params = {
+            'query_hash': 'b3055c01b4b222b8a47dc12b090e4e64',  # Media query hash
+            'variables': json.dumps({'shortcode': shortcode})
+        }
+        
+        logger.info("Пробуем Instagram GraphQL API...")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(graphql_url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    
+                    # Ищем video_url в ответе
+                    data_str = json.dumps(data)
+                    video_matches = re.findall(r'"video_url"\s*:\s*"([^"]+)"', data_str)
+                    
+                    for video_url in video_matches:
+                        video_url = video_url.replace('\\u0026', '&').replace('\\/', '/')
+                        logger.info(f"Найден video URL в GraphQL: {video_url[:80]}...")
+                        
+                        try:
+                            async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=60)) as video_resp:
+                                if video_resp.status == 200:
+                                    content = await video_resp.read()
+                                    if len(content) > 10000:
+                                        temp_dir = tempfile.mkdtemp(prefix="ig_gql_")
+                                        temp_file = os.path.join(temp_dir, "instagram_video.mp4")
+                                        with open(temp_file, 'wb') as f:
+                                            f.write(content)
+                                        logger.info(f"Видео скачано через GraphQL: {temp_file}")
+                                        return temp_file, None, ""
+                        except Exception:
+                            pass
+    except Exception as e:
+        logger.debug(f"GraphQL метод не сработал: {e}")
+    
+    logger.error("Все методы скачивания Instagram исчерпаны")
+    logger.error("Возможные причины: контент приватный, удалён, или Instagram блокирует все запросы")
     return None, None, ""
 
 async def upload_to_0x0(file_path: str) -> Optional[str]:
