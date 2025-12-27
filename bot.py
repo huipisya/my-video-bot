@@ -1006,15 +1006,62 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
     try:
         page = await IG_CONTEXT.new_page()
         
+        # Проверяем количество cookies в контексте
+        context_cookies = await IG_CONTEXT.cookies()
+        logger.info(f"Cookies в контексте: {len(context_cookies)}")
+        
+        # Если cookies мало - пробуем загрузить из файла
+        if len(context_cookies) < 5:
+            logger.warning("Мало cookies в контексте, пробуем загрузить из файла...")
+            ig_cookiefile = _get_instagram_cookiefile()
+            if ig_cookiefile and os.path.exists(ig_cookiefile):
+                try:
+                    cookies_to_add = _read_netscape_cookiefile(ig_cookiefile)
+                    if cookies_to_add:
+                        # Конвертируем в формат Playwright
+                        pw_cookies = []
+                        for c in cookies_to_add:
+                            pw_cookie = {
+                                'name': c.get('name', ''),
+                                'value': c.get('value', ''),
+                                'domain': c.get('domain', '.instagram.com'),
+                                'path': c.get('path', '/'),
+                                'secure': c.get('secure', True),
+                                'httpOnly': c.get('httpOnly', False),
+                                'sameSite': 'Lax'
+                            }
+                            pw_cookies.append(pw_cookie)
+                        await IG_CONTEXT.add_cookies(pw_cookies)
+                        logger.info(f"Добавлено {len(pw_cookies)} cookies из файла")
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки cookies из файла: {e}")
+        
         # Регистрируем перехват сетевых запросов ПЕРЕД переходом на страницу
         page.on('response', on_response)
         
         # Устанавливаем viewport мобильного устройства для лучшей совместимости
         await page.set_viewport_size({"width": 375, "height": 812})
         
+        # Сначала переходим на главную Instagram для активации cookies
+        logger.info("Активируем cookies на instagram.com...")
+        try:
+            await page.goto('https://www.instagram.com/', wait_until='domcontentloaded', timeout=10000)
+            await page.wait_for_timeout(1500)
+        except Exception as e:
+            logger.debug(f"Ошибка при переходе на главную: {e}")
+        
+        logger.info(f"Загружаем страницу: {url}")
         await page.goto(url, wait_until='networkidle', timeout=30000)
+        
+        # Ждём появления видео элемента (до 5 секунд)
+        try:
+            await page.wait_for_selector('video', timeout=5000)
+            logger.info("Видео элемент найден на странице")
+        except Exception:
+            logger.warning("Видео элемент НЕ найден на странице за 5 секунд")
+        
+        await page.wait_for_timeout(2000)
 
-        await page.wait_for_timeout(3000)
 
         page_title = await page.title()
         logger.info(f"Page title: {page_title}")
@@ -1381,8 +1428,36 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
             except Exception as e:
                 logger.error(f"Ошибка yt-dlp скачивания: {e}")
         else:
-            logger.warning("Не найден video URL ни одним методом")
-
+            # Детальная диагностика причин
+            logger.warning("=" * 50)
+            logger.warning("ДИАГНОСТИКА: Не найден video URL")
+            logger.warning(f"  - URL: {url}")
+            logger.warning(f"  - Перехвачено network URLs: {len(captured_video_urls)}")
+            logger.warning(f"  - Page title: {await page.title()}")
+            logger.warning(f"  - Final URL: {page.url}")
+            
+            # Проверяем признаки проблем
+            current_url = page.url
+            if "accounts/login" in current_url:
+                logger.error("  ПРИЧИНА: Страница редиректит на логин - cookies не работают!")
+            elif "challenge" in current_url:
+                logger.error("  ПРИЧИНА: Instagram требует пройти проверку безопасности")
+            else:
+                # Проверяем наличие признаков контента
+                has_video = await page.locator('video').count() > 0
+                has_article = await page.locator('article').count() > 0
+                logger.warning(f"  - Есть video элемент: {has_video}")
+                logger.warning(f"  - Есть article элемент: {has_article}")
+                
+                if not has_article:
+                    logger.error("  ПРИЧИНА: Контент не загружен - возможно cookies истекли или аккаунт заблокирован")
+                elif not has_video:
+                    logger.error("  ПРИЧИНА: Видео элемент не загружен - Instagram может блокировать автоматизацию")
+                else:
+                    logger.error("  ПРИЧИНА: Видео элемент есть но src пустой - контент защищён DRM или требует JS")
+            
+            logger.warning("  РЕШЕНИЕ: Обновите cookies Instagram в переменных окружения")
+            logger.warning("=" * 50)
 
         # Only download photos if this URL doesn't indicate video content
         # This prevents downloading preview images when videos are expected
