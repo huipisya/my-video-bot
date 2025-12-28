@@ -1072,38 +1072,34 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         nonlocal captured_video_urls
         try:
             url_str = response.url
+            url_lower = url_str.lower()
             content_type = response.headers.get('content-type', '')
             
-            # Проверяем Content-Type на video
+            # Исключаем изображения (аватары, превью, миниатюры)
+            # t51.* - это пути для изображений в Instagram CDN
+            image_patterns = ['/t51.', '.jpg', '.jpeg', '.png', '.webp', '.gif', 'fbcdn.net/v/t1.', 'profile_pic']
+            if any(pattern in url_lower for pattern in image_patterns):
+                return  # Пропускаем изображения
+            
+            # Проверяем Content-Type на video (надёжный способ)
             if 'video' in content_type.lower():
                 url_key = url_str[:150]
                 existing_keys = [u[:150] for u in captured_video_urls]
                 if url_key not in existing_keys:
                     captured_video_urls.append(url_str)
-                    logger.info(f"[Network] Перехвачен video URL (Content-Type): {url_str[:100]}...")
+                    logger.info(f"[Network] Перехвачен video URL (Content-Type video): {url_str[:100]}...")
                 return
             
             # Проверяем URL паттерны для Instagram видео
-            url_lower = url_str.lower()
-            # Добавлены паттерны /o1/v/t2/ и /o1/v/t16/ которые используются для Reels
-            video_patterns = ['.mp4', '/video/', 'video_dashinit', 'video.', '_n.mp4', 'video_url', '/o1/v/t2/', '/o1/v/t16/', '/v/t50.']
+            # Паттерны /o1/v/t2/ и /o1/v/t16/ используются для Reels, /v/t50. для постов
+            video_patterns = ['/o1/v/t2/', '/o1/v/t16/', '/v/t50.', '.mp4', '/video/', 'video_dashinit']
             if any(pattern in url_lower for pattern in video_patterns):
-                if any(domain in url_lower for domain in ['cdninstagram.com', 'fbcdn.net', 'instagram.com', 'fbcdn-video', 'scontent']):
-                    # Уникальность по первым 150 символам чтобы избежать дубликатов с разными параметрами
+                if any(domain in url_lower for domain in ['cdninstagram.com', 'fbcdn.net', 'scontent']):
                     url_key = url_str[:150]
                     existing_keys = [u[:150] for u in captured_video_urls]
                     if url_key not in existing_keys:
                         captured_video_urls.append(url_str)
                         logger.info(f"[Network] Перехвачен video URL (URL pattern): {url_str[:100]}...")
-            
-            # Дополнительная проверка для blob/stream URLs
-            if 'bytestart' in url_lower or 'byteend' in url_lower or 'efg=' in url_lower or '_nc_ht=' in url_lower:
-                if any(domain in url_lower for domain in ['cdninstagram', 'fbcdn', 'scontent']):
-                    url_key = url_str[:150]
-                    existing_keys = [u[:150] for u in captured_video_urls]
-                    if url_key not in existing_keys:
-                        captured_video_urls.append(url_str)
-                        logger.info(f"[Network] Перехвачен streaming URL: {url_str[:100]}...")
         except Exception:
             pass
     
