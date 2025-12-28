@@ -1076,23 +1076,32 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
             
             # Проверяем Content-Type на video
             if 'video' in content_type.lower():
-                if url_str not in captured_video_urls:
+                url_key = url_str[:150]
+                existing_keys = [u[:150] for u in captured_video_urls]
+                if url_key not in existing_keys:
                     captured_video_urls.append(url_str)
                     logger.info(f"[Network] Перехвачен video URL (Content-Type): {url_str[:100]}...")
                 return
             
             # Проверяем URL паттерны для Instagram видео
             url_lower = url_str.lower()
-            if any(pattern in url_lower for pattern in ['.mp4', '/video/', 'video_dashinit', 'video.', '_n.mp4', 'video_url']):
+            # Добавлены паттерны /o1/v/t2/ и /o1/v/t16/ которые используются для Reels
+            video_patterns = ['.mp4', '/video/', 'video_dashinit', 'video.', '_n.mp4', 'video_url', '/o1/v/t2/', '/o1/v/t16/', '/v/t50.']
+            if any(pattern in url_lower for pattern in video_patterns):
                 if any(domain in url_lower for domain in ['cdninstagram.com', 'fbcdn.net', 'instagram.com', 'fbcdn-video', 'scontent']):
-                    if url_str not in captured_video_urls:
+                    # Уникальность по первым 150 символам чтобы избежать дубликатов с разными параметрами
+                    url_key = url_str[:150]
+                    existing_keys = [u[:150] for u in captured_video_urls]
+                    if url_key not in existing_keys:
                         captured_video_urls.append(url_str)
                         logger.info(f"[Network] Перехвачен video URL (URL pattern): {url_str[:100]}...")
             
             # Дополнительная проверка для blob/stream URLs
-            if 'bytestart' in url_lower or 'byteend' in url_lower or 'efg=' in url_lower:
+            if 'bytestart' in url_lower or 'byteend' in url_lower or 'efg=' in url_lower or '_nc_ht=' in url_lower:
                 if any(domain in url_lower for domain in ['cdninstagram', 'fbcdn', 'scontent']):
-                    if url_str not in captured_video_urls:
+                    url_key = url_str[:150]
+                    existing_keys = [u[:150] for u in captured_video_urls]
+                    if url_key not in existing_keys:
                         captured_video_urls.append(url_str)
                         logger.info(f"[Network] Перехвачен streaming URL: {url_str[:100]}...")
         except Exception:
@@ -1148,12 +1157,20 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         logger.info(f"Загружаем страницу: {url}")
         await page.goto(url, wait_until='networkidle', timeout=30000)
         
-        # Ждём появления видео элемента (до 5 секунд)
+        # Ждём появления видео элемента (до 8 секунд для лучшей надёжности)
         try:
-            await page.wait_for_selector('video', timeout=5000)
+            await page.wait_for_selector('video', timeout=8000)
             logger.info("Видео элемент найден на странице")
         except Exception:
-            logger.warning("Видео элемент НЕ найден на странице за 5 секунд")
+            logger.warning("Видео элемент НЕ найден на странице за 8 секунд")
+            # Дополнительная попытка: скролл и клик для активации lazy-load
+            try:
+                await page.evaluate('window.scrollBy(0, 500)')
+                await page.wait_for_timeout(1000)
+                await page.evaluate('window.scrollBy(0, -300)')
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
         
         await page.wait_for_timeout(2000)
 
@@ -1289,15 +1306,38 @@ async def download_instagram_with_playwright(url: str) -> Tuple[Optional[str], O
         
         # Method 0: Используем перехваченные URL (ГЛАВНЫЙ МЕТОД - наивысший приоритет)
         if captured_video_urls:
-            # Выбираем лучший URL (предпочитаем .mp4)
+            # Приоритет: /o1/v/t16/ (видео высокого качества) > /o1/v/t2/ > .mp4 > любой
+            best_url = None
+            
+            # Сначала ищем /o1/v/t16/ паттерн (основной видео поток для Reels)
             for url_candidate in captured_video_urls:
-                if '.mp4' in url_candidate.lower():
-                    video_url = url_candidate
-                    logger.info(f"[Method 0] Выбран video URL (.mp4): {video_url[:80]}...")
+                if '/o1/v/t16/' in url_candidate.lower():
+                    best_url = url_candidate
+                    logger.info(f"[Method 0] Выбран video URL (/o1/v/t16/): {best_url[:80]}...")
                     break
-            if not video_url:
-                video_url = captured_video_urls[0]
-                logger.info(f"[Method 0] Выбран video URL (первый): {video_url[:80]}...")
+            
+            # Затем /o1/v/t2/ (видео контент)
+            if not best_url:
+                for url_candidate in captured_video_urls:
+                    if '/o1/v/t2/' in url_candidate.lower():
+                        best_url = url_candidate
+                        logger.info(f"[Method 0] Выбран video URL (/o1/v/t2/): {best_url[:80]}...")
+                        break
+            
+            # Затем .mp4
+            if not best_url:
+                for url_candidate in captured_video_urls:
+                    if '.mp4' in url_candidate.lower():
+                        best_url = url_candidate
+                        logger.info(f"[Method 0] Выбран video URL (.mp4): {best_url[:80]}...")
+                        break
+            
+            # Fallback - первый URL
+            if not best_url:
+                best_url = captured_video_urls[0]
+                logger.info(f"[Method 0] Выбран video URL (первый): {best_url[:80]}...")
+            
+            video_url = best_url
         
         # Method 1: Check og:video meta tags (fallback)
         if not video_url:
@@ -2687,7 +2727,22 @@ async def handle_link(message: Message):
                     await message.answer("Не удалось скачать видео с TikTok.")
         
         elif platform == "instagram":
-            video_path, photos, description = await download_instagram(url)
+            # Показываем исчезающее статусное сообщение
+            status_msg = None
+            try:
+                status_msg = await message.answer("⏳ Скачиваю с Instagram...")
+            except Exception:
+                pass
+            
+            try:
+                video_path, photos, description = await download_instagram(url)
+            finally:
+                # Удаляем статусное сообщение
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
             
             if video_path:
                 await send_video_or_message(chat_id, video_path)
