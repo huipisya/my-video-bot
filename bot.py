@@ -2842,7 +2842,7 @@ async def main():
             allowed_updates = dp.resolve_used_update_types()
             await dp.start_polling(bot, allowed_updates=allowed_updates)
     else:
-        logger.info("Работаю в режиме Polling")
+        logger.info("Работаю в рэжиме Polling")
         try:
             await bot.delete_webhook(drop_pending_updates=True)
             allowed_updates = dp.resolve_used_update_types()
