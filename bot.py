@@ -2077,41 +2077,133 @@ async def download_instagram_via_external_api(url: str) -> Tuple[Optional[str], 
     except Exception as e:
         logger.warning(f"Ошибка igdownloader.app метода: {e}")
     
-    # Метод 9: ddinstagram.com (альтернативный подход - прямой запрос к странице)
+    # Метод 9: indown.io (рабочий сервис)
     try:
-        logger.info("Пробуем ddinstagram (альтернатива)...")
-        
-        # Формируем ddinstagram URL
-        dd_url = url.replace('instagram.com', 'ddinstagram.com').replace('www.', '')
+        logger.info("Пробуем indown.io...")
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(dd_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=True) as resp:
+            api_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Origin': 'https://indown.io',
+                'Referer': 'https://indown.io/',
+            }
+            
+            form_data = aiohttp.FormData()
+            form_data.add_field('referer', 'https://indown.io/')
+            form_data.add_field('locale', 'en')
+            form_data.add_field('p', url)
+            
+            async with session.post('https://indown.io/download', data=form_data, headers=api_headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     
-                    # Ищем видео URL
-                    video_matches = re.findall(r'https://[^\s"<>]+\.mp4[^\s"<>]*', html)
+                    # Ищем download ссылки
+                    video_matches = re.findall(r'href="(https://[^"]+)"[^>]*class="[^"]*download[^"]*"', html)
                     if not video_matches:
-                        video_matches = re.findall(r'(https://[^\s"<>]+(?:video|cdn)[^\s"<>]+)', html)
+                        video_matches = re.findall(r'https://scontent[^"\s<>]+', html)
+                    if not video_matches:
+                        video_matches = re.findall(r'https://[^\s"<>]+cdninstagram[^\s"<>]+', html)
                     
                     for video_url in video_matches:
-                        if 'cdninstagram' in video_url or 'fbcdn' in video_url:
-                            logger.info(f"Найден video URL в ddinstagram: {video_url[:80]}...")
+                        video_url = video_url.replace('&amp;', '&')
+                        if 'cdninstagram' in video_url or 'fbcdn' in video_url or 'scontent' in video_url:
+                            logger.info(f"Найден video URL в indown.io: {video_url[:80]}...")
                             try:
                                 async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=60)) as video_resp:
                                     if video_resp.status == 200:
                                         content = await video_resp.read()
                                         if len(content) > 10000:
-                                            temp_dir = tempfile.mkdtemp(prefix="ig_dd_")
+                                            temp_dir = tempfile.mkdtemp(prefix="ig_indown_")
                                             temp_file = os.path.join(temp_dir, "instagram_video.mp4")
                                             with open(temp_file, 'wb') as f:
                                                 f.write(content)
-                                            logger.info(f"Видео скачано через ddinstagram: {temp_file}")
+                                            logger.info(f"Видео скачано через indown.io: {temp_file}")
+                                            return temp_file, None, ""
+                            except Exception as e:
+                                logger.debug(f"Ошибка скачивания из indown.io: {e}")
+    except Exception as e:
+        logger.warning(f"Ошибка indown.io метода: {e}")
+    
+    # Метод 10: inflact.com (альтернативный)
+    try:
+        logger.info("Пробуем inflact.com...")
+        
+        async with aiohttp.ClientSession() as session:
+            api_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Origin': 'https://inflact.com',
+                'Referer': 'https://inflact.com/downloader/instagram/video/',
+                'X-Requested-With': 'XMLHttpRequest',
+            }
+            
+            form_data = f'url={url}'
+            
+            async with session.post('https://inflact.com/downloader/instagram/video/', data=form_data, headers=api_headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    
+                    # Ищем video URL
+                    video_matches = re.findall(r'https://[^\s"<>\\]+(?:\.mp4|video)[^\s"<>\\]*', text)
+                    
+                    for video_url in video_matches:
+                        video_url = video_url.replace('\\u0026', '&').replace('\\/', '/')
+                        if 'cdninstagram' in video_url or 'fbcdn' in video_url:
+                            logger.info(f"Найден video URL в inflact: {video_url[:80]}...")
+                            try:
+                                async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=60)) as video_resp:
+                                    if video_resp.status == 200:
+                                        content = await video_resp.read()
+                                        if len(content) > 10000:
+                                            temp_dir = tempfile.mkdtemp(prefix="ig_inflact_")
+                                            temp_file = os.path.join(temp_dir, "instagram_video.mp4")
+                                            with open(temp_file, 'wb') as f:
+                                                f.write(content)
+                                            logger.info(f"Видео скачано через inflact: {temp_file}")
                                             return temp_file, None, ""
                             except Exception:
                                 pass
     except Exception as e:
-        logger.warning(f"Ошибка ddinstagram метода: {e}")
+        logger.warning(f"Ошибка inflact.com метода: {e}")
+    
+    # Метод 11: rapid-api (reel downloader)
+    try:
+        logger.info("Пробуем rapidapi reels downloader...")
+        shortcode = shortcode_match.group(2) if shortcode_match else None
+        
+        if shortcode:
+            async with aiohttp.ClientSession() as session:
+                # Пробуем публичный endpoint для reels
+                embed_url = f"https://www.instagram.com/reel/{shortcode}/embed/captioned/"
+                
+                async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        
+                        # Ищем video_url в embed
+                        video_matches = re.findall(r'"video_url"\s*:\s*"([^"]+)"', html)
+                        if video_matches:
+                            video_url = video_matches[0].replace('\\u0026', '&').replace('\\/', '/')
+                            logger.info(f"Найден video URL в embed/captioned: {video_url[:80]}...")
+                            
+                            try:
+                                async with session.get(video_url, headers={'Referer': 'https://www.instagram.com/'}, timeout=aiohttp.ClientTimeout(total=60)) as video_resp:
+                                    if video_resp.status == 200:
+                                        content = await video_resp.read()
+                                        if len(content) > 10000:
+                                            temp_dir = tempfile.mkdtemp(prefix="ig_embed_")
+                                            temp_file = os.path.join(temp_dir, "instagram_video.mp4")
+                                            with open(temp_file, 'wb') as f:
+                                                f.write(content)
+                                            logger.info(f"Видео скачано через embed/captioned: {temp_file}")
+                                            return temp_file, None, ""
+                            except Exception as e:
+                                logger.debug(f"Ошибка скачивания из embed: {e}")
+    except Exception as e:
+        logger.warning(f"Ошибка embed captioned метода: {e}")
     
     logger.error("Все методы скачивания Instagram исчерпаны")
     logger.error("Возможные причины: контент приватный, удалён, или Instagram блокирует все запросы")
@@ -2216,10 +2308,89 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
     
     return None
 
+async def fix_video_for_telegram(file_path: str) -> Optional[str]:
+    """Исправляет метаданные видео для корректного воспроизведения в Telegram.
+    
+    Telegram может показывать видео как GIF (0:00 длительность) если:
+    - Отсутствует moov atom в начале файла
+    - Повреждены метаданные
+    - Неправильный контейнер
+    
+    Эта функция использует ffmpeg для перепаковки видео с правильными метаданными.
+    """
+    import subprocess
+    import shutil
+    
+    # Проверяем наличие ffmpeg
+    ffmpeg_path = shutil.which('ffmpeg')
+    if not ffmpeg_path:
+        logger.warning("ffmpeg не найден в системе, пропускаем исправление метаданных")
+        return file_path
+    
+    try:
+        # Создаём временный файл для выходного видео
+        temp_dir = os.path.dirname(file_path)
+        fixed_file = os.path.join(temp_dir, "fixed_video.mp4")
+        
+        # ffmpeg команда для перепаковки с moov atom в начале
+        cmd = [
+            ffmpeg_path,
+            '-y',  # Перезаписать без запроса
+            '-i', file_path,
+            '-c', 'copy',  # Копируем потоки без перекодирования (быстро)
+            '-movflags', '+faststart',  # Переместить moov atom в начало
+            '-f', 'mp4',
+            fixed_file
+        ]
+        
+        logger.info("Исправление метаданных видео через ffmpeg...")
+        
+        # Запускаем ffmpeg
+        process = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            timeout=60
+        )
+        
+        if process.returncode == 0 and os.path.exists(fixed_file):
+            fixed_size = os.path.getsize(fixed_file)
+            if fixed_size > 10000:  # Минимум 10KB
+                logger.info(f"Видео исправлено: {fixed_file} ({fixed_size} bytes)")
+                # Удаляем оригинальный файл
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                return fixed_file
+            else:
+                logger.warning(f"Исправленный файл слишком маленький: {fixed_size} bytes")
+                try:
+                    os.remove(fixed_file)
+                except Exception:
+                    pass
+        else:
+            stderr = process.stderr.decode('utf-8', errors='ignore') if process.stderr else ''
+            logger.warning(f"ffmpeg вернул код {process.returncode}: {stderr[:200]}")
+            
+    except subprocess.TimeoutExpired:
+        logger.warning("ffmpeg таймаут при исправлении видео")
+    except Exception as e:
+        logger.warning(f"Ошибка при исправлении видео: {e}")
+    
+    return file_path
+
 async def send_video_or_message(chat_id: int, file_path: str, caption: str = ""):
     """Отправка видео или файла"""
     max_telegram_file_size = 50 * 1024 * 1024
     file_size = os.path.getsize(file_path)
+    
+    # Исправляем метаданные видео для корректного отображения в Telegram
+    if file_path.lower().endswith(('.mp4', '.mkv', '.webm', '.mov')):
+        fixed_path = await fix_video_for_telegram(file_path)
+        if fixed_path and fixed_path != file_path:
+            file_path = fixed_path
+            file_size = os.path.getsize(file_path)
     
     if file_size > max_telegram_file_size:
         link = await upload_to_0x0(file_path)
@@ -2232,7 +2403,7 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
     else:
         input_file = FSInputFile(file_path)
         try:
-            await bot.send_video(chat_id=chat_id, video=input_file, caption=caption)
+            await bot.send_video(chat_id=chat_id, video=input_file, caption=caption, supports_streaming=True)
         except TelegramBadRequest as e:
             if "Wrong type of the web page content" in str(e):
                 try:
@@ -2240,7 +2411,12 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
                 except TelegramBadRequest:
                     await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
             else:
-                await bot.send_message(chat_id, f"Ошибка при отправке файла.")
+                # Пробуем отправить как документ при любой другой ошибке
+                try:
+                    await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
+                except Exception:
+                    await bot.send_message(chat_id, f"Ошибка при отправке файла.")
+
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -2730,7 +2906,7 @@ async def handle_link(message: Message):
             # Показываем исчезающее статусное сообщение
             status_msg = None
             try:
-                status_msg = await message.answer("⏳ Скачиваю с Instagram...")
+                status_msg = await message.answer("Скачиваю с Instagram...")
             except Exception:
                 pass
             
@@ -2842,7 +3018,7 @@ async def main():
             allowed_updates = dp.resolve_used_update_types()
             await dp.start_polling(bot, allowed_updates=allowed_updates)
     else:
-        logger.info("Работаю в рэжиме Polling")
+        logger.info("Работаю в ржиме Polling")
         try:
             await bot.delete_webhook(drop_pending_updates=True)
             allowed_updates = dp.resolve_used_update_types()
