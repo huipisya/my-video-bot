@@ -310,13 +310,16 @@ def _read_netscape_cookiefile(file_path: str) -> List[Dict[str, Any]]:
 
 def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dict[str, Any]:
     """Формирует опции для yt_dlp"""
+    # Форматы с fallback на единый поток (для обхода блокировки audio)
+    # best[ext=mp4] - единый поток со звуком, не требует merge
     quality_formats = {
-        'best': 'bestvideo+bestaudio/best',
-        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-        '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-        'audio': 'bestaudio/best',
+        'best': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '1080p': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]',
+        '720p': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
+        '480p': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]',
+        'audio': 'bestaudio[ext=m4a]/bestaudio/best',
     }
+
     
     format_str = quality_formats.get(quality.lower(), quality_formats['720p'])
     
