@@ -822,13 +822,436 @@ async def download_tiktok_photos(url: str) -> Tuple[Optional[List[str]], str]:
     
     return None, ""
 
-async def expand_instagram_share_url(url: str) -> Optional[str]:
-    """Развернуть Instagram share ссылку в полную URL"""
-    import re
+
+# ==================== INSTAGRAM DOWNLOADER ====================
+
+class InstagramDownloader:
+    """Класс для скачивания Instagram контента (Reels, посты, фото)."""
     
-    # Функция для очистки URL от tracking параметров
-    def clean_instagram_url(u: str) -> str:
-        """Удаляет tracking параметры из Instagram URL для лучшей совместимости"""
+    # HTTP заголовки для запросов
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    }
+    
+    def __init__(self):
+        self.logger = logging.getLogger('InstagramDownloader')
+    
+    async def download(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """
+        Главная точка входа - скачивает контент с Instagram.
+        
+        Returns:
+            Tuple[video_path, photo_paths, description]
+        """
+        self.logger.info(f"Начинаем скачивание Instagram: {url[:60]}...")
+        
+        # 1. Разворачиваем share-ссылки
+        if '/share/' in url:
+            expanded = await self._expand_share_url(url)
+            if expanded:
+                url = expanded
+                self.logger.info(f"Share URL развёрнут: {url[:60]}...")
+        
+        # Определяем тип контента
+        is_video_url = any(x in url.lower() for x in ['/reel/', '/reels/', '/tv/'])
+        
+        # 2. Пробуем методы последовательно
+        methods = [
+            ('yt-dlp', self._method_ytdlp),
+            ('Embed API', self._method_embed),
+            ('FastDL', self._method_fastdl),
+            ('iGram', self._method_igram),
+            ('Playwright', self._method_playwright),
+        ]
+        
+        for name, method in methods:
+            try:
+                self.logger.info(f"Пробуем метод: {name}")
+                result = await method(url)
+                if result[0] or result[1]:  # video или photos
+                    self.logger.info(f"Успех через {name}!")
+                    return result
+            except Exception as e:
+                self.logger.warning(f"Метод {name} не сработал: {e}")
+                continue
+        
+        self.logger.error("Все методы скачивания Instagram исчерпаны")
+        return None, None, ""
+    
+    async def _expand_share_url(self, url: str) -> Optional[str]:
+        """Разворачивает share-ссылку в полный URL."""
+        import re
+        import aiohttp
+        
+        try:
+            async with aiohttp.ClientSession(headers=self.HEADERS) as session:
+                async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    final_url = str(resp.url)
+                    
+                    # Очищаем от tracking параметров
+                    final_url = re.sub(r'[?&]igsh=[^&]+', '', final_url)
+                    final_url = re.sub(r'[?&]utm_[^&]+', '', final_url)
+                    final_url = re.sub(r'\?$', '', final_url)
+                    
+                    if 'instagram.com' in final_url and any(x in final_url for x in ['/p/', '/reel/', '/tv/', '/reels/']):
+                        return final_url
+                    
+                    # Пробуем найти в HTML
+                    html = await resp.text()
+                    match = re.search(r'instagram\.com/(reel|p|tv)/([A-Za-z0-9_-]+)', html)
+                    if match:
+                        return f"https://www.instagram.com/{match.group(1)}/{match.group(2)}/"
+        except Exception as e:
+            self.logger.warning(f"Ошибка разворачивания share URL: {e}")
+        
+        return None
+    
+    def _extract_shortcode(self, url: str) -> Optional[str]:
+        """Извлекает shortcode из Instagram URL."""
+        import re
+        match = re.search(r'/(p|reel|tv|reels)/([A-Za-z0-9_-]+)', url)
+        return match.group(2) if match else None
+    
+    async def _download_video(self, video_url: str, session: 'aiohttp.ClientSession' = None) -> Optional[str]:
+        """Скачивает видео по прямой ссылке."""
+        import aiohttp
+        
+        headers = {
+            'User-Agent': self.HEADERS['User-Agent'],
+            'Referer': 'https://www.instagram.com/',
+        }
+        
+        close_session = False
+        if session is None:
+            session = aiohttp.ClientSession()
+            close_session = True
+        
+        try:
+            async with session.get(video_url, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    if len(content) > 10000:  # Минимум 10KB
+                        temp_dir = tempfile.mkdtemp(prefix="ig_")
+                        temp_file = os.path.join(temp_dir, "video.mp4")
+                        with open(temp_file, 'wb') as f:
+                            f.write(content)
+                        self.logger.info(f"Видео скачано: {len(content)} bytes")
+                        return temp_file
+        except Exception as e:
+            self.logger.warning(f"Ошибка скачивания видео: {e}")
+        finally:
+            if close_session:
+                await session.close()
+        
+        return None
+    
+    # ==================== МЕТОД 1: YT-DLP ====================
+    
+    async def _method_ytdlp(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Скачивание через yt-dlp (быстрый метод без cookies)."""
+        temp_dir = tempfile.mkdtemp(prefix="ig_ytdlp_")
+        
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': False,
+            'extract_flat': False,
+            'socket_timeout': 15,
+            'http_headers': {
+                'User-Agent': self.HEADERS['User-Agent'],
+                'Referer': 'https://www.instagram.com/',
+            }
+        }
+        
+        try:
+            info = await asyncio.to_thread(self._ytdlp_extract, url, ydl_opts)
+            
+            if isinstance(info, dict):
+                description = info.get('description', '') or info.get('title', '')
+            else:
+                description = ""
+            
+            # Ищем скачанные файлы
+            files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
+            
+            # Видео
+            video_exts = ('.mp4', '.mkv', '.webm', '.mov')
+            for f in files:
+                if f.lower().endswith(video_exts) and os.path.getsize(f) > 10000:
+                    return f, None, description
+            
+            # Фото
+            photo_exts = ('.jpg', '.jpeg', '.png', '.webp')
+            photos = [f for f in files if f.lower().endswith(photo_exts)]
+            if photos:
+                return None, sorted(photos), description
+                
+        except Exception as e:
+            self.logger.debug(f"yt-dlp не сработал: {e}")
+            # Очистка при ошибке
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except:
+                pass
+        
+        return None, None, ""
+    
+    def _ytdlp_extract(self, url: str, opts: dict):
+        """Синхронная обёртка для yt-dlp."""
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=True)
+    
+    # ==================== МЕТОД 2: EMBED API ====================
+    
+    async def _method_embed(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Скачивание через Instagram Embed страницу."""
+        import re
+        import aiohttp
+        
+        shortcode = self._extract_shortcode(url)
+        if not shortcode:
+            return None, None, ""
+        
+        # Пробуем оба варианта embed
+        embed_urls = [
+            f"https://www.instagram.com/p/{shortcode}/embed/",
+            f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
+        ]
+        
+        async with aiohttp.ClientSession() as session:
+            for embed_url in embed_urls:
+                try:
+                    async with session.get(embed_url, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status != 200:
+                            continue
+                        
+                        html = await resp.text()
+                        
+                        # Ищем video_url в JSON
+                        patterns = [
+                            r'"video_url"\s*:\s*"([^"]+)"',
+                            r'"contentUrl"\s*:\s*"([^"]+)"',
+                        ]
+                        
+                        for pattern in patterns:
+                            matches = re.findall(pattern, html)
+                            for match in matches:
+                                video_url = match.replace('\\u0026', '&').replace('\\/', '/')
+                                if 'mp4' in video_url.lower() or 'video' in video_url.lower():
+                                    video_path = await self._download_video(video_url, session)
+                                    if video_path:
+                                        return video_path, None, ""
+                except Exception as e:
+                    self.logger.debug(f"Embed {embed_url} не сработал: {e}")
+        
+        return None, None, ""
+    
+    # ==================== МЕТОД 3: FASTDL ====================
+    
+    async def _method_fastdl(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Скачивание через FastDL.app API."""
+        import re
+        import aiohttp
+        
+        api_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin': 'https://fastdl.app',
+            'Referer': 'https://fastdl.app/en',
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                form_data = aiohttp.FormData()
+                form_data.add_field('url', url)
+                
+                async with session.post('https://fastdl.app/api/convert', data=form_data, headers=api_headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        return None, None, ""
+                    
+                    data = await resp.json()
+                    data_str = json.dumps(data)
+                    
+                    # Ищем video URL
+                    video_url = None
+                    if isinstance(data, dict):
+                        video_url = data.get('url') or data.get('video_url') or data.get('download_url')
+                    
+                    if not video_url:
+                        matches = re.findall(r'https://[^\s"\\]+\.mp4[^\s"\\]*', data_str)
+                        if matches:
+                            video_url = matches[0].replace('\\u0026', '&')
+                    
+                    if video_url:
+                        video_path = await self._download_video(video_url, session)
+                        if video_path:
+                            return video_path, None, ""
+            except Exception as e:
+                self.logger.debug(f"FastDL не сработал: {e}")
+        
+        return None, None, ""
+    
+    # ==================== МЕТОД 4: IGRAM ====================
+    
+    async def _method_igram(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Скачивание через iGram.world API."""
+        import re
+        import aiohttp
+        
+        api_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://igram.world',
+            'Referer': 'https://igram.world/',
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                form_data = aiohttp.FormData()
+                form_data.add_field('url', url)
+                form_data.add_field('locale', 'en')
+                
+                async with session.post('https://api.igram.world/api/convert', data=form_data, headers=api_headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        return None, None, ""
+                    
+                    data = await resp.json()
+                    
+                    # Ищем video URL
+                    items = data if isinstance(data, list) else data.get('items', []) if isinstance(data, dict) else []
+                    for item in items:
+                        if isinstance(item, dict):
+                            video_url = item.get('url') or item.get('video_url')
+                            if video_url and ('mp4' in video_url or 'video' in video_url):
+                                video_path = await self._download_video(video_url, session)
+                                if video_path:
+                                    return video_path, None, ""
+            except Exception as e:
+                self.logger.debug(f"iGram не сработал: {e}")
+        
+        return None, None, ""
+    
+    # ==================== МЕТОД 5: PLAYWRIGHT ====================
+    
+    async def _method_playwright(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+        """Скачивание через Playwright (fallback без cookies)."""
+        global IG_CONTEXT, IG_PLAYWRIGHT_READY
+        
+        if not IG_PLAYWRIGHT_READY or not IG_CONTEXT:
+            self.logger.info("Playwright не инициализирован, пропускаем")
+            return None, None, ""
+        
+        page = None
+        captured_urls: List[str] = []
+        
+        async def on_response(response):
+            """Перехват видео URL из сетевых запросов."""
+            try:
+                url_str = response.url.lower()
+                content_type = response.headers.get('content-type', '')
+                
+                # Пропускаем изображения
+                if any(x in url_str for x in ['/t51.', '.jpg', '.jpeg', '.png', '.webp', 'profile_pic']):
+                    return
+                
+                # Проверяем на видео
+                if 'video' in content_type.lower() or any(x in url_str for x in ['/o1/v/t16/', '/o1/v/t2/', '.mp4']):
+                    if response.url not in captured_urls:
+                        captured_urls.append(response.url)
+                        self.logger.debug(f"Перехвачен video URL: {response.url[:80]}...")
+            except:
+                pass
+        
+        try:
+            page = await IG_CONTEXT.new_page()
+            page.on('response', on_response)
+            
+            await page.set_viewport_size({"width": 375, "height": 812})
+            
+            # Загружаем страницу
+            await page.goto(url, wait_until='networkidle', timeout=20000)
+            await page.wait_for_timeout(2000)
+            
+            # Пробуем активировать видео
+            try:
+                video_el = page.locator('video')
+                if await video_el.count() > 0:
+                    await video_el.first.click(timeout=2000)
+                    await page.wait_for_timeout(2000)
+            except:
+                pass
+            
+            description = ""
+            try:
+                og_desc = page.locator('meta[property="og:description"]')
+                if await og_desc.count() > 0:
+                    description = await og_desc.first.get_attribute('content') or ""
+            except:
+                pass
+            
+            # Скачиваем перехваченное видео
+            if captured_urls:
+                # Приоритет: /o1/v/t16/ > /o1/v/t2/ > .mp4 > любой
+                best_url = None
+                for pattern in ['/o1/v/t16/', '/o1/v/t2/', '.mp4']:
+                    for u in captured_urls:
+                        if pattern in u.lower():
+                            best_url = u
+                            break
+                    if best_url:
+                        break
+                
+                if not best_url:
+                    best_url = captured_urls[0]
+                
+                self.logger.info(f"Используем перехваченный URL: {best_url[:60]}...")
+                video_path = await self._download_video(best_url)
+                if video_path:
+                    return video_path, None, description
+            
+            # Fallback: og:video
+            try:
+                og_video = page.locator('meta[property="og:video"], meta[property="og:video:secure_url"]')
+                if await og_video.count() > 0:
+                    video_url = await og_video.first.get_attribute('content')
+                    if video_url:
+                        video_path = await self._download_video(video_url)
+                        if video_path:
+                            return video_path, None, description
+            except:
+                pass
+            
+        except Exception as e:
+            self.logger.error(f"Playwright ошибка: {e}")
+        finally:
+            if page:
+                await page.close()
+        
+        return None, None, ""
+
+
+# Глобальный экземпляр загрузчика
+_instagram_downloader = InstagramDownloader()
+
+
+async def download_instagram(url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
+    """Обёртка для обратной совместимости."""
+    return await _instagram_downloader.download(url)
+
+
+async def expand_instagram_share_url(url: str) -> Optional[str]:
+    """Обёртка для обратной совместимости."""
+    return await _instagram_downloader._expand_share_url(url)
+
+
+
+    def _expand_share_url(u: str) -> Optional[str]:
         if not u:
             return u
         # Удаляем igsh и другие tracking параметры, но сохраняем основную часть URL
