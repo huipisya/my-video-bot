@@ -664,6 +664,7 @@ class YouTubeDownloader:
             ('Cobalt API', lambda: self._method_cobalt(url, api_quality)),
             ('Y2mate', lambda: self._method_y2mate(url, quality)),
             ('SaveTube', lambda: self._method_savetube(url, quality)),
+            ('Loader.to', lambda: self._method_loaderto(url, quality)),
             ('yt-dlp', lambda: self._method_ytdlp(url, quality)),
         ]
         
@@ -738,16 +739,22 @@ class YouTubeDownloader:
                     self.logger.debug(f"Пробуем Cobalt instance: {instance}")
                     
                     async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        resp_text = await resp.text()
                         if resp.status != 200:
-                            self.logger.debug(f"Cobalt {instance} вернул статус {resp.status}")
+                            self.logger.warning(f"Cobalt {instance} статус {resp.status}: {resp_text[:200]}")
                             continue
                         
-                        data = await resp.json()
+                        try:
+                            data = json.loads(resp_text)
+                        except:
+                            self.logger.warning(f"Cobalt {instance} invalid JSON: {resp_text[:200]}")
+                            continue
                         status = data.get('status')
                         
                         if status == 'error':
-                            error_code = data.get('error', {}).get('code', 'unknown')
-                            self.logger.debug(f"Cobalt error: {error_code}")
+                            error_info = data.get('error', {})
+                            error_code = error_info.get('code', 'unknown') if isinstance(error_info, dict) else str(error_info)
+                            self.logger.warning(f"Cobalt error: {error_code}")
                             continue
                         
                         # tunnel или redirect - есть URL для скачивания
@@ -768,7 +775,7 @@ class YouTubeDownloader:
                                         return await self._download_file(download_url, 'video.mp4')
                         
                 except Exception as e:
-                    self.logger.debug(f"Cobalt {instance} ошибка: {e}")
+                    self.logger.warning(f"Cobalt {instance} ошибка: {e}")
                     continue
         
         return None
@@ -858,7 +865,7 @@ class YouTubeDownloader:
                             return await self._download_file(download_url, f"{title}.mp4")
                 
             except Exception as e:
-                self.logger.debug(f"Y2mate ошибка: {e}")
+                self.logger.warning(f"Y2mate ошибка: {e}")
         
         return None
     
@@ -925,11 +932,84 @@ class YouTubeDownloader:
                         return await self._download_file(best_format['url'], f"{title}.mp4")
                 
             except Exception as e:
-                self.logger.debug(f"SaveTube ошибка: {e}")
+                self.logger.warning(f"SaveTube ошибка: {e}")
         
         return None
     
-    # ==================== МЕТОД 4: YT-DLP (FALLBACK) ====================
+    # ==================== МЕТОД 4: LOADER.TO ====================
+    
+    async def _method_loaderto(self, url: str, quality: str) -> Optional[str]:
+        """Скачивание через Loader.to API."""
+        import aiohttp
+        import re
+        
+        headers = {
+            'User-Agent': self.HEADERS['User-Agent'],
+            'Accept': 'application/json',
+            'Origin': 'https://loader.to',
+            'Referer': 'https://loader.to/',
+        }
+        
+        # Маппинг качества
+        format_map = {
+            'best': '1080',
+            '1080p': '1080',
+            '720p': '720',
+            '480p': '480',
+            '360p': '360',
+        }
+        fmt = format_map.get(quality.lower(), '720')
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Шаг 1: Инициализация загрузки
+                init_url = f"https://loader.to/ajax/download.php?format=mp4-{fmt}&url={url}"
+                
+                async with session.get(init_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        self.logger.warning(f"Loader.to init статус {resp.status}")
+                        return None
+                    
+                    data = await resp.json()
+                    
+                    if not data.get('success'):
+                        self.logger.warning(f"Loader.to init failed: {data}")
+                        return None
+                    
+                    download_id = data.get('id')
+                    if not download_id:
+                        return None
+                    
+                    # Шаг 2: Проверяем статус и ждём готовности
+                    progress_url = f"https://loader.to/ajax/progress.php?id={download_id}"
+                    
+                    for attempt in range(30):  # Максимум 30 секунд
+                        await asyncio.sleep(1)
+                        
+                        async with session.get(progress_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as prog_resp:
+                            if prog_resp.status != 200:
+                                continue
+                            
+                            prog_data = await prog_resp.json()
+                            
+                            if prog_data.get('success') == 1:
+                                download_url = prog_data.get('download_url')
+                                if download_url:
+                                    self.logger.info(f"Loader.to готов: {download_url[:60]}...")
+                                    return await self._download_file(download_url, 'video.mp4')
+                            
+                            # Если ошибка
+                            if prog_data.get('success') == 0 and prog_data.get('progress', 0) == 0:
+                                if attempt > 5:  # Даём шанс
+                                    self.logger.warning(f"Loader.to не готов после {attempt} попыток")
+                                    break
+                    
+            except Exception as e:
+                self.logger.warning(f"Loader.to ошибка: {e}")
+        
+        return None
+    
+    # ==================== МЕТОД 5: YT-DLP (FALLBACK) ====================
     
     async def _method_ytdlp(self, url: str, quality: str) -> Optional[str]:
         """Скачивание через yt-dlp (fallback)."""
