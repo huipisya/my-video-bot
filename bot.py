@@ -56,6 +56,11 @@ IG_BROWSER: Optional[Browser] = None
 IG_CONTEXT: Optional[BrowserContext] = None
 IG_PLAYWRIGHT_READY = False
 
+# YouTube Auto-Cookie Refresh
+YOUTUBE_VISITOR_DATA: Optional[str] = None
+YOUTUBE_COOKIES_LAST_REFRESH: Optional[datetime] = None
+YOUTUBE_REFRESH_INTERVAL = 1800  # 30 минут
+
 bot: Optional[Bot] = None
 dp = Dispatcher()
 
@@ -623,438 +628,163 @@ def _ydl_download_path(url: str, ydl_opts: Dict[str, Any]) -> Optional[str]:
 
 # ==================== YOUTUBE DOWNLOADER ====================
 
-class YouTubeDownloader:
-    """Класс для скачивания YouTube контента через внешние API."""
+async def refresh_youtube_visitor_data():
+    """Обновляет YouTube visitor_data через Playwright."""
+    global YOUTUBE_VISITOR_DATA, YOUTUBE_COOKIES_LAST_REFRESH, YT_CONTEXT, YT_PLAYWRIGHT_READY
     
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/html, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
+    if not YT_PLAYWRIGHT_READY or not YT_CONTEXT:
+        logger.warning("YouTube Playwright не готов для обновления cookies")
+        return False
     
-    # Cobalt API instances (можно добавить свои)
-    COBALT_INSTANCES = [
-        "https://api.cobalt.tools",
-        "https://cobalt-api.kwiatekmiki.com",
-    ]
-    
-    def __init__(self):
-        self.logger = logging.getLogger('YouTubeDownloader')
-    
-    async def download(self, url: str, quality: str = "720p") -> Optional[str]:
-        """
-        Главная точка входа - скачивает видео с YouTube.
-        Пробует внешние API, затем yt-dlp как fallback.
-        """
-        self.logger.info(f"Скачивание YouTube: {url[:60]}... (качество={quality})")
+    page = None
+    try:
+        logger.info("Обновление YouTube visitor_data...")
+        page = await YT_CONTEXT.new_page()
         
-        # Нормализуем качество для API
-        quality_map = {
-            'best': 'max',
-            '1080p': '1080',
-            '720p': '720',
-            '480p': '480',
-            '360p': '360',
-            'audio': '128',
-        }
-        api_quality = quality_map.get(quality.lower(), '720')
+        # Заходим на YouTube
+        await page.goto("https://www.youtube.com", wait_until='networkidle', timeout=30000)
         
-        # Пробуем методы последовательно
-        methods = [
-            ('Cobalt API', lambda: self._method_cobalt(url, api_quality)),
-            ('Y2mate', lambda: self._method_y2mate(url, quality)),
-            ('SaveTube', lambda: self._method_savetube(url, quality)),
-            ('Loader.to', lambda: self._method_loaderto(url, quality)),
-            ('yt-dlp', lambda: self._method_ytdlp(url, quality)),
-        ]
-        
-        for name, method in methods:
-            try:
-                self.logger.info(f"Пробуем метод: {name}")
-                result = await method()
-                if result and os.path.exists(result):
-                    self.logger.info(f"Успех через {name}!")
-                    return result
-            except Exception as e:
-                self.logger.warning(f"Метод {name} не сработал: {e}")
-                continue
-        
-        self.logger.error("Все методы скачивания YouTube исчерпаны")
-        return None
-    
-    async def _download_file(self, url: str, filename: str = "video.mp4") -> Optional[str]:
-        """Скачивает файл по прямой ссылке."""
-        import aiohttp
-        
-        headers = {
-            'User-Agent': self.HEADERS['User-Agent'],
-            'Referer': 'https://www.youtube.com/',
-        }
-        
+        # Принимаем consent если есть
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        if len(content) > 50000:  # Минимум 50KB для видео
-                            temp_dir = tempfile.mkdtemp(prefix="yt_")
-                            # Убираем недопустимые символы из имени файла
-                            safe_filename = "".join(c for c in filename if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-                            if not safe_filename:
-                                safe_filename = "video.mp4"
-                            if not safe_filename.endswith('.mp4'):
-                                safe_filename += '.mp4'
-                            temp_file = os.path.join(temp_dir, safe_filename)
-                            with open(temp_file, 'wb') as f:
-                                f.write(content)
-                            self.logger.info(f"Видео скачано: {len(content)} bytes")
-                            return temp_file
-        except Exception as e:
-            self.logger.warning(f"Ошибка скачивания файла: {e}")
+            # Разные варианты кнопок согласия
+            for selector in ['button:has-text("Accept all")', 'button:has-text("I agree")', 'button:has-text("Принять все")']:
+                btn = page.locator(selector)
+                if await btn.count() > 0:
+                    await btn.first.click()
+                    await page.wait_for_timeout(2000)
+                    break
+        except Exception:
+            pass
         
-        return None
-    
-    # ==================== МЕТОД 1: COBALT API ====================
-    
-    async def _method_cobalt(self, url: str, quality: str) -> Optional[str]:
-        """Скачивание через Cobalt API (cobalt.tools)."""
-        import aiohttp
+        # Ждём загрузки
+        await page.wait_for_timeout(3000)
         
-        headers = {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'User-Agent': self.HEADERS['User-Agent'],
-        }
+        # Извлекаем cookies
+        cookies = await page.context.cookies()
         
-        payload = {
-            'url': url,
-            'videoQuality': quality,
-            'filenameStyle': 'basic',
-        }
+        visitor_data = None
+        for cookie in cookies:
+            if cookie.get('name') == 'VISITOR_INFO1_LIVE':
+                visitor_data = cookie.get('value')
+                break
         
-        async with aiohttp.ClientSession() as session:
-            for instance in self.COBALT_INSTANCES:
-                try:
-                    api_url = f"{instance}/"
-                    self.logger.debug(f"Пробуем Cobalt instance: {instance}")
-                    
-                    async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        resp_text = await resp.text()
-                        if resp.status != 200:
-                            self.logger.warning(f"Cobalt {instance} статус {resp.status}: {resp_text[:200]}")
-                            continue
-                        
-                        try:
-                            data = json.loads(resp_text)
-                        except:
-                            self.logger.warning(f"Cobalt {instance} invalid JSON: {resp_text[:200]}")
-                            continue
-                        status = data.get('status')
-                        
-                        if status == 'error':
-                            error_info = data.get('error', {})
-                            error_code = error_info.get('code', 'unknown') if isinstance(error_info, dict) else str(error_info)
-                            self.logger.warning(f"Cobalt error: {error_code}")
-                            continue
-                        
-                        # tunnel или redirect - есть URL для скачивания
-                        if status in ('tunnel', 'redirect'):
-                            download_url = data.get('url')
-                            filename = data.get('filename', 'video.mp4')
-                            if download_url:
-                                self.logger.info(f"Cobalt вернул URL: {download_url[:60]}...")
-                                return await self._download_file(download_url, filename)
-                        
-                        # picker - несколько вариантов (выбираем первый видео)
-                        elif status == 'picker':
-                            picker = data.get('picker', [])
-                            for item in picker:
-                                if item.get('type') == 'video':
-                                    download_url = item.get('url')
-                                    if download_url:
-                                        return await self._download_file(download_url, 'video.mp4')
-                        
-                except Exception as e:
-                    self.logger.warning(f"Cobalt {instance} ошибка: {e}")
-                    continue
-        
-        return None
-    
-    # ==================== МЕТОД 2: Y2MATE ====================
-    
-    async def _method_y2mate(self, url: str, quality: str) -> Optional[str]:
-        """Скачивание через Y2mate API."""
-        import aiohttp
-        import re
-        
-        headers = {
-            'User-Agent': self.HEADERS['User-Agent'],
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://www.y2mate.com',
-            'Referer': 'https://www.y2mate.com/',
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                # Шаг 1: Анализ видео
-                analyze_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
-                form_data = aiohttp.FormData()
-                form_data.add_field('k_query', url)
-                form_data.add_field('k_page', 'home')
-                form_data.add_field('hl', 'en')
-                form_data.add_field('q_auto', '1')
-                
-                async with session.post(analyze_url, data=form_data, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        return None
-                    
-                    data = await resp.json()
-                    
-                    if data.get('status') != 'ok':
-                        return None
-                    
-                    vid = data.get('vid')
-                    links = data.get('links', {}).get('mp4', {})
-                    
-                    if not vid or not links:
-                        return None
-                    
-                    # Выбираем нужное качество
-                    quality_priority = ['1080', '720', '480', '360']
-                    if quality.replace('p', '') in quality_priority:
-                        quality_priority = [quality.replace('p', '')] + quality_priority
-                    
-                    selected_key = None
-                    for q in quality_priority:
-                        for key, val in links.items():
-                            if isinstance(val, dict) and q in val.get('q', ''):
-                                selected_key = val.get('k')
-                                break
-                        if selected_key:
-                            break
-                    
-                    if not selected_key:
-                        # Берём первый доступный
-                        for key, val in links.items():
-                            if isinstance(val, dict) and val.get('k'):
-                                selected_key = val.get('k')
-                                break
-                    
-                    if not selected_key:
-                        return None
-                    
-                    # Шаг 2: Получаем ссылку на скачивание
-                    convert_url = "https://www.y2mate.com/mates/convertV2/index"
-                    form_data2 = aiohttp.FormData()
-                    form_data2.add_field('vid', vid)
-                    form_data2.add_field('k', selected_key)
-                    
-                    async with session.post(convert_url, data=form_data2, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp2:
-                        if resp2.status != 200:
-                            return None
-                        
-                        data2 = await resp2.json()
-                        
-                        if data2.get('status') != 'ok':
-                            return None
-                        
-                        download_url = data2.get('dlink')
-                        if download_url:
-                            title = data.get('title', 'video')
-                            return await self._download_file(download_url, f"{title}.mp4")
-                
-            except Exception as e:
-                self.logger.warning(f"Y2mate ошибка: {e}")
-        
-        return None
-    
-    # ==================== МЕТОД 3: SAVETUBE ====================
-    
-    async def _method_savetube(self, url: str, quality: str) -> Optional[str]:
-        """Скачивание через SaveTube.me API."""
-        import aiohttp
-        import re
-        
-        headers = {
-            'User-Agent': self.HEADERS['User-Agent'],
-            'Accept': 'application/json, text/plain, */*',
-            'Content-Type': 'application/json',
-            'Origin': 'https://savetube.me',
-            'Referer': 'https://savetube.me/',
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                # Извлекаем video ID
-                video_id = None
-                patterns = [
-                    r'(?:v=|/)([a-zA-Z0-9_-]{11})(?:[?&]|$)',
-                    r'youtu\.be/([a-zA-Z0-9_-]{11})',
-                    r'shorts/([a-zA-Z0-9_-]{11})',
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, url)
-                    if match:
-                        video_id = match.group(1)
-                        break
-                
-                if not video_id:
-                    return None
-                
-                # API запрос
-                api_url = f"https://api.savetube.me/info?url=https://www.youtube.com/watch?v={video_id}"
-                
-                async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        return None
-                    
-                    data = await resp.json()
-                    
-                    # Ищем ссылки для скачивания
-                    formats = data.get('formats', [])
-                    if not formats:
-                        formats = data.get('adaptiveFormats', [])
-                    
-                    # Выбираем подходящий формат
-                    quality_num = int(quality.replace('p', '')) if quality.replace('p', '').isdigit() else 720
-                    
-                    best_format = None
-                    for fmt in formats:
-                        if fmt.get('mimeType', '').startswith('video/mp4'):
-                            height = fmt.get('height', 0)
-                            if height <= quality_num:
-                                if not best_format or height > best_format.get('height', 0):
-                                    best_format = fmt
-                    
-                    if best_format and best_format.get('url'):
-                        title = data.get('title', 'video')
-                        return await self._download_file(best_format['url'], f"{title}.mp4")
-                
-            except Exception as e:
-                self.logger.warning(f"SaveTube ошибка: {e}")
-        
-        return None
-    
-    # ==================== МЕТОД 4: LOADER.TO ====================
-    
-    async def _method_loaderto(self, url: str, quality: str) -> Optional[str]:
-        """Скачивание через Loader.to API."""
-        import aiohttp
-        import re
-        
-        headers = {
-            'User-Agent': self.HEADERS['User-Agent'],
-            'Accept': 'application/json',
-            'Origin': 'https://loader.to',
-            'Referer': 'https://loader.to/',
-        }
-        
-        # Маппинг качества
-        format_map = {
-            'best': '1080',
-            '1080p': '1080',
-            '720p': '720',
-            '480p': '480',
-            '360p': '360',
-        }
-        fmt = format_map.get(quality.lower(), '720')
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                # Шаг 1: Инициализация загрузки
-                init_url = f"https://loader.to/ajax/download.php?format=mp4-{fmt}&url={url}"
-                
-                async with session.get(init_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        self.logger.warning(f"Loader.to init статус {resp.status}")
-                        return None
-                    
-                    data = await resp.json()
-                    
-                    if not data.get('success'):
-                        self.logger.warning(f"Loader.to init failed: {data}")
-                        return None
-                    
-                    download_id = data.get('id')
-                    if not download_id:
-                        return None
-                    
-                    # Шаг 2: Проверяем статус и ждём готовности
-                    progress_url = f"https://loader.to/ajax/progress.php?id={download_id}"
-                    
-                    for attempt in range(30):  # Максимум 30 секунд
-                        await asyncio.sleep(1)
-                        
-                        async with session.get(progress_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as prog_resp:
-                            if prog_resp.status != 200:
-                                continue
-                            
-                            prog_data = await prog_resp.json()
-                            
-                            if prog_data.get('success') == 1:
-                                download_url = prog_data.get('download_url')
-                                if download_url:
-                                    self.logger.info(f"Loader.to готов: {download_url[:60]}...")
-                                    return await self._download_file(download_url, 'video.mp4')
-                            
-                            # Если ошибка
-                            if prog_data.get('success') == 0 and prog_data.get('progress', 0) == 0:
-                                if attempt > 5:  # Даём шанс
-                                    self.logger.warning(f"Loader.to не готов после {attempt} попыток")
-                                    break
-                    
-            except Exception as e:
-                self.logger.warning(f"Loader.to ошибка: {e}")
-        
-        return None
-    
-    # ==================== МЕТОД 5: YT-DLP (FALLBACK) ====================
-    
-    async def _method_ytdlp(self, url: str, quality: str) -> Optional[str]:
-        """Скачивание через yt-dlp (fallback)."""
-        
-        async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
-            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
-            ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
-            ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
-            ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
+        if visitor_data:
+            YOUTUBE_VISITOR_DATA = visitor_data
+            YOUTUBE_COOKIES_LAST_REFRESH = datetime.now()
+            logger.info(f"YouTube visitor_data обновлён: {visitor_data[:20]}...")
             
-            try:
-                return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
-            except Exception as e:
-                if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
-                    ydl_opts_retry = dict(ydl_opts)
-                    ydl_opts_retry.pop('impersonate', None)
-                    return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
-                raise
-        
-        # Пробуем разные клиенты
-        clients_to_try = [
-            ["web"],
-            ["ios"],
-            ["android"],
-            ["tv_embedded"],
-        ]
-        
-        for clients in clients_to_try:
-            try:
-                result = await _try_ydl(use_cookies=False, player_clients=clients)
-                if result:
-                    return result
-            except Exception as e:
-                self.logger.debug(f"yt-dlp client {clients} ошибка: {e}")
-        
-        return None
+            # Также сохраняем cookies в файл для yt-dlp
+            cookie_file = "cookies_youtube.txt"
+            with open(cookie_file, 'w', encoding='utf-8') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                for cookie in cookies:
+                    domain = cookie.get('domain', '')
+                    if 'youtube' in domain or 'google' in domain:
+                        flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                        path = cookie.get('path', '/')
+                        secure = 'TRUE' if cookie.get('secure') else 'FALSE'
+                        expires = int(cookie.get('expires', 0)) if cookie.get('expires') else 0
+                        name = cookie.get('name', '')
+                        value = cookie.get('value', '')
+                        f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+            
+            logger.info(f"YouTube cookies сохранены в {cookie_file}")
+            return True
+        else:
+            logger.warning("VISITOR_INFO1_LIVE cookie не найден")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Ошибка обновления YouTube visitor_data: {e}")
+        return False
+    finally:
+        if page:
+            await page.close()
 
 
-# Глобальный экземпляр загрузчика
-_youtube_downloader = YouTubeDownloader()
+async def youtube_cookie_refresh_loop():
+    """Фоновый цикл обновления YouTube cookies."""
+    global YOUTUBE_REFRESH_INTERVAL
+    
+    # Первоначальная задержка для инициализации Playwright
+    await asyncio.sleep(10)
+    
+    while True:
+        try:
+            await refresh_youtube_visitor_data()
+        except Exception as e:
+            logger.error(f"Ошибка в цикле обновления YouTube cookies: {e}")
+        
+        # Ждём перед следующим обновлением
+        await asyncio.sleep(YOUTUBE_REFRESH_INTERVAL)
 
 
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
-    """Скачивание с YouTube через внешние API и yt-dlp."""
-    return await _youtube_downloader.download(url, quality)
+    """Скачивание с YouTube через yt-dlp с автоматическими cookies."""
+    global YOUTUBE_VISITOR_DATA
+    
+    logger.info(f"Скачивание YouTube: {url[:60]}... (качество={quality})")
+    
+    # Проверяем, нужно ли обновить cookies
+    if YOUTUBE_COOKIES_LAST_REFRESH is None:
+        logger.info("Первый запуск - обновляем YouTube cookies...")
+        await refresh_youtube_visitor_data()
+    
+    async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
+        ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
+        ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
+        ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
+        ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
+        
+        # Добавляем visitor_data если есть
+        if YOUTUBE_VISITOR_DATA:
+            ydl_opts['extractor_args']['youtube']['visitor_data'] = [YOUTUBE_VISITOR_DATA]
+        
+        try:
+            return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
+        except Exception as e:
+            if "Impersonate target" in str(e) and "not available" in str(e) and ydl_opts.get('impersonate'):
+                ydl_opts_retry = dict(ydl_opts)
+                ydl_opts_retry.pop('impersonate', None)
+                return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
+            raise
+    
+    # Пробуем с cookies, затем без
+    attempts = [
+        (True, ["web"]),
+        (True, ["ios"]),
+        (True, ["android"]),
+        (True, ["tv_embedded"]),
+        (False, ["web"]),
+        (False, ["ios"]),
+    ]
+    
+    last_error = None
+    for use_cookies, clients in attempts:
+        try:
+            result = await _try_ydl(use_cookies=use_cookies, player_clients=clients)
+            if result:
+                logger.info(f"YouTube скачан через yt-dlp (cookies={use_cookies}, client={clients[0]})")
+                return result
+        except Exception as e:
+            last_error = e
+            logger.warning(f"yt-dlp client={clients[0]} cookies={use_cookies}: {str(e)[:100]}")
+    
+    # Если все попытки провалились, пробуем обновить cookies и ещё раз
+    if last_error and "Sign in" in str(last_error):
+        logger.info("Обновляем cookies и пробуем снова...")
+        await refresh_youtube_visitor_data()
+        
+        try:
+            result = await _try_ydl(use_cookies=True, player_clients=["web"])
+            if result:
+                logger.info("YouTube скачан после обновления cookies!")
+                return result
+        except Exception as e:
+            logger.error(f"Не удалось после обновления cookies: {e}")
+    
+    logger.error("Все методы скачивания YouTube исчерпаны")
+    return None
 
 async def download_youtube_with_playwright(url: str, quality: str = "720p") -> Optional[str]:
     """Резервный метод через Playwright"""
@@ -2429,6 +2159,10 @@ async def main():
     
     await init_instagram_playwright()
     await init_youtube_playwright()
+    
+    # Запускаем фоновую задачу обновления YouTube cookies
+    asyncio.create_task(youtube_cookie_refresh_loop())
+    logger.info("Фоновое обновление YouTube cookies запущено")
     
     bot = Bot(token=BOT_TOKEN, session=AiohttpSession())
     
