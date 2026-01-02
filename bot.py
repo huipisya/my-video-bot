@@ -646,16 +646,15 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     po_token_raw = (os.getenv("YTDLP_YT_PO_TOKEN") or "").strip()
     attempt_plan: List[Tuple[bool, List[str]]] = [
         (False, ["web"]),
-        (False, ["tv_embedded"]),
         (False, ["ios"]),
+        (False, ["android"]),
+        (False, ["android_creator"]),
+        (False, ["android_music"]),
+        (False, ["tv"]),
+        (False, ["tv_embedded"]),
     ]
     if po_token_raw:
         attempt_plan.append((False, ["mweb"]))
-
-    attempt_plan.extend([
-        (True, ["web"]),
-        (True, ["web_embedded"]),
-    ])
 
     last_error: Optional[Exception] = None
     for use_cookies, clients in attempt_plan:
@@ -694,29 +693,8 @@ async def download_youtube_with_playwright(url: str, quality: str = "720p") -> O
             except Exception:
                 pass
 
-        cookies = await YT_CONTEXT.cookies()
-        if cookies:
-            temp_cookies_file = Path(tempfile.mktemp(suffix='.txt'))
-            with open(temp_cookies_file, 'w', encoding='utf-8') as f:
-                f.write("# Netscape HTTP Cookie File\n")
-                for cookie in cookies:
-
-                    domain = cookie['domain']
-                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
-                    path = cookie['path']
-                    secure = 'TRUE' if cookie['secure'] else 'FALSE'
-                    expires = int(cookie['expires']) if cookie.get('expires') and cookie['expires'] > 0 else 0
-                    name = cookie['name']
-                    value = cookie['value']
-                    f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
-
-            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
-            ydl_opts['cookiefile'] = str(temp_cookies_file)
-            ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
-            ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
-            ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
-        else:
-            ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
+        # Не используем куки, так как пользователь просил их убрать
+        ydl_opts = get_ydl_opts(quality, use_youtube_cookies=False)
 
         try:
             temp_file = await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
