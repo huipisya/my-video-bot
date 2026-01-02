@@ -1894,9 +1894,22 @@ async def handle_link(message: Message):
     
     try:
         if platform == "youtube":
-            temp_file = await download_youtube(url, quality)
-            if not temp_file:
-                temp_file = await download_youtube_with_playwright(url, quality)
+            status_msg = None
+            try:
+                status_msg = await message.answer("Скачиваю с YouTube...")
+            except Exception:
+                pass
+
+            try:
+                temp_file = await download_youtube(url, quality)
+                if not temp_file:
+                    temp_file = await download_youtube_with_playwright(url, quality)
+            finally:
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
             
             if temp_file:
                 await send_video_or_message(chat_id, temp_file)
@@ -1913,7 +1926,21 @@ async def handle_link(message: Message):
                 )
 
         elif platform == "rutube":
-            temp_file = await download_rutube(url, quality)
+            status_msg = None
+            try:
+                status_msg = await message.answer("Скачиваю с RuTube...")
+            except Exception:
+                pass
+
+            try:
+                temp_file = await download_rutube(url, quality)
+            finally:
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+
             if temp_file:
                 await send_video_or_message(chat_id, temp_file)
                 cleanup_file(temp_file)
@@ -1923,7 +1950,21 @@ async def handle_link(message: Message):
         
         elif platform == "tiktok":
             if '/photo/' in url.lower():
-                photos, description = await download_tiktok_photos(url)
+                status_msg = None
+                try:
+                    status_msg = await message.answer("Скачиваю с TikTok...")
+                except Exception:
+                    pass
+
+                try:
+                    photos, description = await download_tiktok_photos(url)
+                finally:
+                    if status_msg:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+
                 if photos:
                     temp_photos = photos
                     media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
@@ -1938,7 +1979,21 @@ async def handle_link(message: Message):
                 else:
                     await message.answer("Не удалось скачать фото с TikTok.")
             else:
-                temp_file = await download_tiktok(url, quality)
+                status_msg = None
+                try:
+                    status_msg = await message.answer("Скачиваю с TikTok...")
+                except Exception:
+                    pass
+
+                try:
+                    temp_file = await download_tiktok(url, quality)
+                finally:
+                    if status_msg:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+
                 if temp_file:
                     await send_video_or_message(chat_id, temp_file)
                     cleanup_file(temp_file)
