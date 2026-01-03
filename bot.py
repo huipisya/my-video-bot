@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
+import aiohttp
 import aiohttp.web
 import yt_dlp
 from aiogram import Bot, Dispatcher, F
@@ -485,9 +486,22 @@ async def init_youtube_playwright():
     logger.info("Инициализация YouTube Playwright...")
     try:
         pw = await async_playwright().start()
-        YT_BROWSER = await pw.chromium.launch(headless=True)
+        YT_BROWSER = await pw.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+            ]
+        )
         YT_CONTEXT = await YT_BROWSER.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080},
+            locale='en-US',
+            timezone_id='America/New_York',
+            extra_http_headers={
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
         )
 
         cookie_file_path = Path("cookies_youtube.txt")
@@ -645,23 +659,55 @@ async def refresh_youtube_visitor_data():
         logger.info("Обновление YouTube visitor_data...")
         page = await YT_CONTEXT.new_page()
         
-        # Заходим на YouTube
-        await page.goto("https://www.youtube.com", wait_until='networkidle', timeout=30000)
+        # Устанавливаем дополнительные заголовки для обхода детекции бота
+        await page.set_extra_http_headers({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        })
         
-        # Принимаем consent если есть
-        try:
-            # Разные варианты кнопок согласия
-            for selector in ['button:has-text("Accept all")', 'button:has-text("I agree")', 'button:has-text("Принять все")']:
-                btn = page.locator(selector)
-                if await btn.count() > 0:
-                    await btn.first.click()
+        # Заходим на YouTube
+        await page.goto("https://www.youtube.com", wait_until='domcontentloaded', timeout=30000)
+        await page.wait_for_timeout(2000)
+        
+        # Принимаем consent если есть - расширенный список селекторов
+        consent_selectors = [
+            'button[aria-label*="Accept"]',
+            'button[aria-label*="accept"]',
+            'button:has-text("Accept all")',
+            'button:has-text("Accept All")',
+            'button:has-text("I agree")',
+            'button:has-text("Agree")',
+            'button:has-text("Принять все")',
+            'button:has-text("Согласен")',
+            'button:has-text("Reject all")',  # Иногда нужно отклонить
+            '[aria-label="Accept the use of cookies and other data for the purposes described"]',
+            'form[action*="consent"] button',
+            'ytd-consent-bump-v2-lightbox button.yt-spec-button-shape-next--call-to-action',
+        ]
+        
+        for selector in consent_selectors:
+            try:
+                btn = page.locator(selector).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    logger.info(f"Нажата кнопка consent: {selector[:50]}")
                     await page.wait_for_timeout(2000)
                     break
+            except Exception:
+                continue
+        
+        # Ждём полной загрузки
+        await page.wait_for_timeout(3000)
+        
+        # Пробуем перейти на видео для получения cookies
+        try:
+            # Ищем любое видео на главной
+            video_link = page.locator('a#thumbnail[href*="watch"]').first
+            if await video_link.is_visible(timeout=2000):
+                await video_link.click()
+                await page.wait_for_timeout(3000)
         except Exception:
             pass
-        
-        # Ждём загрузки
-        await page.wait_for_timeout(3000)
         
         # Извлекаем cookies
         cookies = await page.context.cookies()
@@ -671,6 +717,36 @@ async def refresh_youtube_visitor_data():
             if cookie.get('name') == 'VISITOR_INFO1_LIVE':
                 visitor_data = cookie.get('value')
                 break
+        
+        # Если cookie не найден, пробуем извлечь visitor_data из JavaScript
+        if not visitor_data:
+            try:
+                # YouTube хранит visitor_data в ytInitialData
+                visitor_data = await page.evaluate('''() => {
+                    try {
+                        // Вариант 1: из ytcfg
+                        if (typeof ytcfg !== 'undefined' && ytcfg.get) {
+                            const vd = ytcfg.get('VISITOR_DATA');
+                            if (vd) return vd;
+                        }
+                        // Вариант 2: из window.yt
+                        if (window.yt && window.yt.config_ && window.yt.config_.VISITOR_DATA) {
+                            return window.yt.config_.VISITOR_DATA;
+                        }
+                        // Вариант 3: из ytInitialData
+                        if (typeof ytInitialData !== 'undefined' && ytInitialData.responseContext) {
+                            const visitorData = ytInitialData.responseContext.visitorData;
+                            if (visitorData) return visitorData;
+                        }
+                        return null;
+                    } catch (e) {
+                        return null;
+                    }
+                }''')
+                if visitor_data:
+                    logger.info("visitor_data извлечён из JavaScript")
+            except Exception as e:
+                logger.debug(f"Не удалось извлечь visitor_data из JS: {e}")
         
         if visitor_data:
             YOUTUBE_VISITOR_DATA = visitor_data
@@ -695,7 +771,9 @@ async def refresh_youtube_visitor_data():
             logger.info(f"YouTube cookies сохранены в {cookie_file}")
             return True
         else:
-            logger.warning("VISITOR_INFO1_LIVE cookie не найден")
+            # Логируем какие cookies мы получили для отладки
+            cookie_names = [c.get('name') for c in cookies if 'youtube' in c.get('domain', '') or 'google' in c.get('domain', '')]
+            logger.warning(f"VISITOR_INFO1_LIVE не найден. Доступные cookies: {cookie_names[:10]}")
             return False
             
     except Exception as e:
@@ -703,7 +781,11 @@ async def refresh_youtube_visitor_data():
         return False
     finally:
         if page:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
+
 
 
 async def youtube_cookie_refresh_loop():
@@ -735,31 +817,28 @@ async def youtube_cookie_refresh_loop():
 
 
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
-    """Скачивание с YouTube через yt-dlp с автоматическими cookies."""
+    """Скачивание с YouTube через yt-dlp + внешние API."""
     global YOUTUBE_VISITOR_DATA, YOUTUBE_COOKIES_LAST_REFRESH
     
     logger.info(f"Скачивание YouTube: {url[:60]}... (качество={quality})")
     
     # Проверяем возраст cookies - обновляем если старше 25 минут
-    cookies_age_ok = True
     if YOUTUBE_COOKIES_LAST_REFRESH:
         age_seconds = (datetime.now() - YOUTUBE_COOKIES_LAST_REFRESH).total_seconds()
         if age_seconds > 1500:  # 25 минут
-            cookies_age_ok = False
             logger.info(f"Cookies устарели ({age_seconds/60:.1f} мин) - обновляем...")
-    
-    # Первый запуск или устаревшие cookies
-    if YOUTUBE_COOKIES_LAST_REFRESH is None or not cookies_age_ok:
+            await refresh_youtube_visitor_data()
+    elif YOUTUBE_COOKIES_LAST_REFRESH is None:
         await refresh_youtube_visitor_data()
     
-    async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
-        ydl_opts = get_ydl_opts(quality, use_youtube_cookies=use_cookies)
-        ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
-        ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
-        ydl_opts['extractor_args']['youtube']['player_client'] = player_clients
+    # =============== МЕТОД 1: yt-dlp с cookies ===============
+    async def _try_ydl() -> Optional[str]:
+        ydl_opts = get_ydl_opts(quality, use_youtube_cookies=True)
         
         # Добавляем visitor_data если есть
         if YOUTUBE_VISITOR_DATA:
+            ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
+            ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
             ydl_opts['extractor_args']['youtube']['visitor_data'] = [YOUTUBE_VISITOR_DATA]
         
         try:
@@ -771,62 +850,182 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                 return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
             raise
     
-    # Паттерны ошибок, требующих обновления cookies
-    BLOCK_PATTERNS = [
-        "Sign in",
-        "bot",
-        "confirm you're not",
-        "age-restricted",
-        "login required",
-        "private video",
-        "This video is unavailable",
-        "Video unavailable",
-        "blocked",
-        "403",
-        "HTTP Error 403",
-    ]
+    # Паттерны ошибок блокировки
+    BLOCK_PATTERNS = ["Sign in", "bot", "confirm you're not", "age-restricted", 
+                      "login required", "blocked", "403", "HTTP Error 403"]
     
     def _is_block_error(error: Exception) -> bool:
         err_str = str(error).lower()
-        return any(pattern.lower() in err_str for pattern in BLOCK_PATTERNS)
+        return any(p.lower() in err_str for p in BLOCK_PATTERNS)
     
-    # Пробуем с cookies, затем без
-    attempts = [
-        (True, ["web"]),
-        (True, ["ios"]),
-        (True, ["android"]),
-        (True, ["tv_embedded"]),
-        (False, ["web"]),
-        (False, ["ios"]),
+    # Попытка 1: yt-dlp
+    try:
+        result = await _try_ydl()
+        if result:
+            logger.info("YouTube скачан через yt-dlp")
+            return result
+    except Exception as e:
+        logger.warning(f"yt-dlp ошибка: {str(e)[:100]}")
+        
+        # Если блокировка - обновляем cookies и пробуем ещё раз
+        if _is_block_error(e):
+            logger.info("Блокировка! Обновляем cookies...")
+            if await refresh_youtube_visitor_data():
+                try:
+                    result = await _try_ydl()
+                    if result:
+                        logger.info("YouTube скачан после обновления cookies!")
+                        return result
+                except Exception as e2:
+                    logger.warning(f"yt-dlp retry ошибка: {str(e2)[:80]}")
+    
+    # =============== МЕТОД 2: Внешние API ===============
+    
+    # Извлекаем video_id
+    video_id = None
+    import re
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})',
+        r'(?:youtube\.com/embed/)([a-zA-Z0-9_-]{11})',
     ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            video_id = match.group(1)
+            break
     
-    last_error = None
-    for use_cookies, clients in attempts:
+    if not video_id:
+        logger.error("Не удалось извлечь video_id")
+        return None
+    
+    # API 1: Cobalt.tools
+    async def try_cobalt() -> Optional[str]:
+        logger.info("Пробуем Cobalt API...")
+        async with aiohttp.ClientSession() as session:
+            try:
+                payload = {
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "vCodec": "h264",
+                    "vQuality": "720" if quality == "720p" else "1080" if quality == "1080p" else "max",
+                    "aFormat": "mp3",
+                    "filenamePattern": "basic",
+                }
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                }
+                async with session.post(
+                    "https://api.cobalt.tools/api/json",
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        download_url = data.get("url")
+                        if download_url:
+                            # Скачиваем файл
+                            async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
+                                if dl_resp.status == 200:
+                                    temp_dir = tempfile.mkdtemp()
+                                    temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+                                    with open(temp_file, 'wb') as f:
+                                        async for chunk in dl_resp.content.iter_chunked(8192):
+                                            f.write(chunk)
+                                    if os.path.getsize(temp_file) > 10000:
+                                        logger.info("Скачано через Cobalt!")
+                                        return temp_file
+            except Exception as e:
+                logger.debug(f"Cobalt ошибка: {e}")
+        return None
+    
+    # API 2: SaveFrom (ssyoutube)
+    async def try_savefrom() -> Optional[str]:
+        logger.info("Пробуем SaveFrom API...")
+        async with aiohttp.ClientSession() as session:
+            try:
+                api_url = f"https://api.ssyoutube.com/api/v1/get?url=https://www.youtube.com/watch?v={video_id}"
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+                async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Ищем MP4 ссылку
+                        links = data.get("links", [])
+                        mp4_url = None
+                        for link in links:
+                            if link.get("type") == "mp4" or "mp4" in str(link.get("quality", "")).lower():
+                                mp4_url = link.get("url")
+                                break
+                        if mp4_url:
+                            async with session.get(mp4_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
+                                if dl_resp.status == 200:
+                                    temp_dir = tempfile.mkdtemp()
+                                    temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+                                    with open(temp_file, 'wb') as f:
+                                        async for chunk in dl_resp.content.iter_chunked(8192):
+                                            f.write(chunk)
+                                    if os.path.getsize(temp_file) > 10000:
+                                        logger.info("Скачано через SaveFrom!")
+                                        return temp_file
+            except Exception as e:
+                logger.debug(f"SaveFrom ошибка: {e}")
+        return None
+    
+    # API 3: Y2mate
+    async def try_y2mate() -> Optional[str]:
+        logger.info("Пробуем Y2mate API...")
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Шаг 1: Analyze
+                analyze_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
+                data = {"k_query": url, "k_page": "home", "hl": "en", "q_auto": "1"}
+                headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
+                async with session.post(analyze_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        vid = result.get("vid")
+                        links = result.get("links", {}).get("mp4", {})
+                        
+                        # Ищем подходящее качество
+                        target_key = None
+                        for key, info in links.items():
+                            q = info.get("q", "")
+                            if "720" in q or "480" in q:
+                                target_key = key
+                                break
+                        
+                        if target_key and vid:
+                            # Шаг 2: Convert
+                            convert_url = "https://www.y2mate.com/mates/convertV2/index"
+                            convert_data = {"vid": vid, "k": target_key}
+                            async with session.post(convert_url, data=convert_data, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as conv_resp:
+                                if conv_resp.status == 200:
+                                    conv_result = await conv_resp.json()
+                                    download_url = conv_result.get("dlink")
+                                    if download_url:
+                                        async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
+                                            if dl_resp.status == 200:
+                                                temp_dir = tempfile.mkdtemp()
+                                                temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+                                                with open(temp_file, 'wb') as f:
+                                                    async for chunk in dl_resp.content.iter_chunked(8192):
+                                                        f.write(chunk)
+                                                if os.path.getsize(temp_file) > 10000:
+                                                    logger.info("Скачано через Y2mate!")
+                                                    return temp_file
+            except Exception as e:
+                logger.debug(f"Y2mate ошибка: {e}")
+        return None
+    
+    # Пробуем внешние API
+    for api_func in [try_cobalt, try_savefrom, try_y2mate]:
         try:
-            result = await _try_ydl(use_cookies=use_cookies, player_clients=clients)
+            result = await api_func()
             if result:
-                logger.info(f"YouTube скачан через yt-dlp (cookies={use_cookies}, client={clients[0]})")
                 return result
         except Exception as e:
-            last_error = e
-            logger.warning(f"yt-dlp client={clients[0]} cookies={use_cookies}: {str(e)[:100]}")
-    
-    # Если все попытки провалились и это ошибка блокировки - обновляем cookies
-    if last_error and _is_block_error(last_error):
-        logger.info("Обнаружена блокировка! Обновляем cookies и пробуем снова...")
-        refresh_success = await refresh_youtube_visitor_data()
-        
-        if refresh_success:
-            # Пробуем все варианты заново с новыми cookies
-            retry_clients = [["web"], ["ios"], ["android"]]
-            for clients in retry_clients:
-                try:
-                    result = await _try_ydl(use_cookies=True, player_clients=clients)
-                    if result:
-                        logger.info(f"YouTube скачан после обновления cookies! (client={clients[0]})")
-                        return result
-                except Exception as e:
-                    logger.warning(f"Retry after refresh client={clients[0]}: {str(e)[:80]}")
+            logger.debug(f"API ошибка: {e}")
+            continue
     
     logger.error("Все методы скачивания YouTube исчерпаны")
     return None
