@@ -898,33 +898,83 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         logger.error("Не удалось извлечь video_id")
         return None
     
-    # API 1: Cobalt.tools
+    # API 1: Cobalt.tools (обновлённый endpoint)
     async def try_cobalt() -> Optional[str]:
         logger.info("Пробуем Cobalt API...")
         async with aiohttp.ClientSession() as session:
             try:
                 payload = {
                     "url": f"https://www.youtube.com/watch?v={video_id}",
-                    "vCodec": "h264",
-                    "vQuality": "720" if quality == "720p" else "1080" if quality == "1080p" else "max",
-                    "aFormat": "mp3",
-                    "filenamePattern": "basic",
+                    "videoQuality": "720" if quality == "720p" else "1080" if quality == "1080p" else "max",
+                    "filenameStyle": "basic",
+                    "downloadMode": "auto",
                 }
                 headers = {
                     "Accept": "application/json",
                     "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
                 }
-                async with session.post(
-                    "https://api.cobalt.tools/api/json",
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as resp:
+                # Пробуем несколько эндпоинтов Cobalt
+                endpoints = [
+                    "https://api.cobalt.tools/",
+                    "https://co.wuk.sh/api/json",
+                ]
+                for endpoint in endpoints:
+                    try:
+                        async with session.post(
+                            endpoint,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as resp:
+                            resp_text = await resp.text()
+                            logger.debug(f"Cobalt {endpoint} status={resp.status}")
+                            if resp.status == 200:
+                                try:
+                                    data = json.loads(resp_text)
+                                except:
+                                    continue
+                                download_url = data.get("url") or data.get("stream") or data.get("audio")
+                                if download_url:
+                                    logger.info(f"Cobalt вернул URL, скачиваем...")
+                                    async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
+                                        if dl_resp.status == 200:
+                                            temp_dir = tempfile.mkdtemp()
+                                            temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+                                            with open(temp_file, 'wb') as f:
+                                                async for chunk in dl_resp.content.iter_chunked(8192):
+                                                    f.write(chunk)
+                                            if os.path.getsize(temp_file) > 10000:
+                                                logger.info("Скачано через Cobalt!")
+                                                return temp_file
+                                else:
+                                    logger.debug(f"Cobalt ответ без URL: {resp_text[:200]}")
+                    except Exception as ep_e:
+                        logger.debug(f"Cobalt endpoint {endpoint} ошибка: {ep_e}")
+                        continue
+            except Exception as e:
+                logger.warning(f"Cobalt общая ошибка: {e}")
+        return None
+    
+    # API 2: RapidSave
+    async def try_rapidsave() -> Optional[str]:
+        logger.info("Пробуем RapidSave API...")
+        async with aiohttp.ClientSession() as session:
+            try:
+                api_url = "https://rapidsave.com/api/ajax/download"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://rapidsave.com",
+                    "Referer": "https://rapidsave.com/",
+                }
+                data = {"url": f"https://www.youtube.com/watch?v={video_id}"}
+                async with session.post(api_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        download_url = data.get("url")
+                        result = await resp.json()
+                        logger.debug(f"RapidSave response: {str(result)[:200]}")
+                        download_url = result.get("url") or result.get("download_url")
                         if download_url:
-                            # Скачиваем файл
                             async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
                                 if dl_resp.status == 200:
                                     temp_dir = tempfile.mkdtemp()
@@ -933,31 +983,112 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                                         async for chunk in dl_resp.content.iter_chunked(8192):
                                             f.write(chunk)
                                     if os.path.getsize(temp_file) > 10000:
-                                        logger.info("Скачано через Cobalt!")
+                                        logger.info("Скачано через RapidSave!")
                                         return temp_file
+                    else:
+                        logger.debug(f"RapidSave status {resp.status}")
             except Exception as e:
-                logger.debug(f"Cobalt ошибка: {e}")
+                logger.warning(f"RapidSave ошибка: {e}")
         return None
     
-    # API 2: SaveFrom (ssyoutube)
-    async def try_savefrom() -> Optional[str]:
-        logger.info("Пробуем SaveFrom API...")
+    # API 3: Y2mate (улучшенный)
+    async def try_y2mate() -> Optional[str]:
+        logger.info("Пробуем Y2mate API...")
         async with aiohttp.ClientSession() as session:
             try:
-                api_url = f"https://api.ssyoutube.com/api/v1/get?url=https://www.youtube.com/watch?v={video_id}"
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
-                async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                # Шаг 1: Analyze
+                analyze_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
+                form_data = {"k_query": url, "k_page": "home", "hl": "en", "q_auto": "1"}
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://www.y2mate.com",
+                    "Referer": "https://www.y2mate.com/",
+                }
+                async with session.post(analyze_url, data=form_data, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        logger.debug(f"Y2mate analyze status {resp.status}")
+                        return None
+                    result = await resp.json()
+                    logger.debug(f"Y2mate analyze: {str(result)[:200]}")
+                    
+                    vid = result.get("vid")
+                    links = result.get("links", {}).get("mp4", {})
+                    
+                    if not links:
+                        logger.debug("Y2mate: нет mp4 ссылок")
+                        return None
+                    
+                    # Ищем подходящее качество (720p, 480p, 360p)
+                    target_key = None
+                    for key, info in links.items():
+                        q = str(info.get("q", ""))
+                        if any(x in q for x in ["720", "480", "360"]):
+                            target_key = key
+                            break
+                    
+                    if not target_key:
+                        # Берём первый доступный
+                        target_key = list(links.keys())[0] if links else None
+                    
+                    if not target_key or not vid:
+                        logger.debug("Y2mate: не найден ключ или vid")
+                        return None
+                    
+                    # Шаг 2: Convert
+                    convert_url = "https://www.y2mate.com/mates/convertV2/index"
+                    convert_data = {"vid": vid, "k": target_key}
+                    async with session.post(convert_url, data=convert_data, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as conv_resp:
+                        if conv_resp.status != 200:
+                            logger.debug(f"Y2mate convert status {conv_resp.status}")
+                            return None
+                        conv_result = await conv_resp.json()
+                        logger.debug(f"Y2mate convert: {str(conv_result)[:200]}")
+                        
+                        download_url = conv_result.get("dlink")
+                        if not download_url:
+                            logger.debug("Y2mate: нет dlink")
+                            return None
+                        
+                        # Скачиваем
+                        async with session.get(download_url, headers={"User-Agent": headers["User-Agent"]}, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
+                            if dl_resp.status == 200:
+                                temp_dir = tempfile.mkdtemp()
+                                temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+                                with open(temp_file, 'wb') as f:
+                                    async for chunk in dl_resp.content.iter_chunked(8192):
+                                        f.write(chunk)
+                                if os.path.getsize(temp_file) > 10000:
+                                    logger.info("Скачано через Y2mate!")
+                                    return temp_file
+                            else:
+                                logger.debug(f"Y2mate download status {dl_resp.status}")
+            except Exception as e:
+                logger.warning(f"Y2mate ошибка: {e}")
+        return None
+    
+    # API 4: SnapSave
+    async def try_snapsave() -> Optional[str]:
+        logger.info("Пробуем SnapSave API...")
+        async with aiohttp.ClientSession() as session:
+            try:
+                api_url = "https://snapsave.io/action.php"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://snapsave.io",
+                }
+                data = {"url": f"https://www.youtube.com/watch?v={video_id}"}
+                async with session.post(api_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        # Ищем MP4 ссылку
-                        links = data.get("links", [])
-                        mp4_url = None
-                        for link in links:
-                            if link.get("type") == "mp4" or "mp4" in str(link.get("quality", "")).lower():
-                                mp4_url = link.get("url")
-                                break
-                        if mp4_url:
-                            async with session.get(mp4_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
+                        result = await resp.text()
+                        logger.debug(f"SnapSave response: {result[:200]}")
+                        # Парсим HTML ответ для поиска ссылок
+                        import re
+                        urls = re.findall(r'href="(https://[^"]+\.mp4[^"]*)"', result)
+                        if urls:
+                            download_url = urls[0]
+                            async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
                                 if dl_resp.status == 200:
                                     temp_dir = tempfile.mkdtemp()
                                     temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
@@ -965,60 +1096,14 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                                         async for chunk in dl_resp.content.iter_chunked(8192):
                                             f.write(chunk)
                                     if os.path.getsize(temp_file) > 10000:
-                                        logger.info("Скачано через SaveFrom!")
+                                        logger.info("Скачано через SnapSave!")
                                         return temp_file
             except Exception as e:
-                logger.debug(f"SaveFrom ошибка: {e}")
-        return None
-    
-    # API 3: Y2mate
-    async def try_y2mate() -> Optional[str]:
-        logger.info("Пробуем Y2mate API...")
-        async with aiohttp.ClientSession() as session:
-            try:
-                # Шаг 1: Analyze
-                analyze_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
-                data = {"k_query": url, "k_page": "home", "hl": "en", "q_auto": "1"}
-                headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
-                async with session.post(analyze_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        vid = result.get("vid")
-                        links = result.get("links", {}).get("mp4", {})
-                        
-                        # Ищем подходящее качество
-                        target_key = None
-                        for key, info in links.items():
-                            q = info.get("q", "")
-                            if "720" in q or "480" in q:
-                                target_key = key
-                                break
-                        
-                        if target_key and vid:
-                            # Шаг 2: Convert
-                            convert_url = "https://www.y2mate.com/mates/convertV2/index"
-                            convert_data = {"vid": vid, "k": target_key}
-                            async with session.post(convert_url, data=convert_data, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as conv_resp:
-                                if conv_resp.status == 200:
-                                    conv_result = await conv_resp.json()
-                                    download_url = conv_result.get("dlink")
-                                    if download_url:
-                                        async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
-                                            if dl_resp.status == 200:
-                                                temp_dir = tempfile.mkdtemp()
-                                                temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
-                                                with open(temp_file, 'wb') as f:
-                                                    async for chunk in dl_resp.content.iter_chunked(8192):
-                                                        f.write(chunk)
-                                                if os.path.getsize(temp_file) > 10000:
-                                                    logger.info("Скачано через Y2mate!")
-                                                    return temp_file
-            except Exception as e:
-                logger.debug(f"Y2mate ошибка: {e}")
+                logger.warning(f"SnapSave ошибка: {e}")
         return None
     
     # Пробуем внешние API
-    for api_func in [try_cobalt, try_savefrom, try_y2mate]:
+    for api_func in [try_cobalt, try_rapidsave, try_y2mate, try_snapsave]:
         try:
             result = await api_func()
             if result:
