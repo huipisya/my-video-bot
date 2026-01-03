@@ -2,5 +2,6 @@ aiogram==3.22.0
 python-dotenv==1.0.1
 yt-dlp>=2025.1.15
 playwright
-#KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKбля
+aiohttp>=3.9.0
+pytubefix>=6.0.0
 curl-cffi==0.7.4

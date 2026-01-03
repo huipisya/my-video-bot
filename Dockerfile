@@ -4,9 +4,17 @@ FROM python:3.12-slim
 # Устанавливаем рабочую директорию в контейнере
 WORKDIR /app
 
-# Обновляем список пакетов и устанавливаем ffmpeg
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# Обновляем список пакетов и устанавливаем ffmpeg, curl, unzip для Deno
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Устанавливаем Deno (нужен для yt-dlp nsig extraction)
+RUN curl -fsSL https://deno.land/install.sh | sh
+ENV DENO_INSTALL="/root/.deno"
+ENV PATH="${DENO_INSTALL}/bin:${PATH}"
 
 # Копируем файл зависимостей в контейнер
 COPY requirements.txt .

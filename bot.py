@@ -1102,6 +1102,49 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                 logger.warning(f"SnapSave ошибка: {e}")
         return None
     
+    # API 5: pytubefix (не зависит от yt-dlp)
+    async def try_pytubefix() -> Optional[str]:
+        logger.info("Пробуем pytubefix...")
+        try:
+            from pytubefix import YouTube
+            from pytubefix.cli import on_progress
+            
+            def _download_with_pytubefix():
+                yt = YouTube(url, on_progress_callback=on_progress)
+                
+                # Выбираем качество
+                if quality == "audio":
+                    stream = yt.streams.filter(only_audio=True).first()
+                else:
+                    # Сначала пробуем progressive (видео+аудио вместе)
+                    stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+                    
+                    if not stream:
+                        # Если нет progressive, берём adaptive
+                        stream = yt.streams.filter(adaptive=True, file_extension='mp4').order_by('resolution').desc().first()
+                
+                if stream:
+                    temp_dir = tempfile.mkdtemp()
+                    output_path = stream.download(output_path=temp_dir)
+                    if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                        return output_path
+                return None
+            
+            result = await asyncio.to_thread(_download_with_pytubefix)
+            if result:
+                logger.info("Скачано через pytubefix!")
+                return result
+        except ImportError:
+            logger.debug("pytubefix не установлен")
+        except Exception as e:
+            logger.warning(f"pytubefix ошибка: {e}")
+        return None
+    
+    # Пробуем pytubefix первым (самый надёжный)
+    result = await try_pytubefix()
+    if result:
+        return result
+    
     # Пробуем внешние API
     for api_func in [try_cobalt, try_rapidsave, try_y2mate, try_snapsave]:
         try:
