@@ -61,6 +61,10 @@ YOUTUBE_VISITOR_DATA: Optional[str] = None
 YOUTUBE_COOKIES_LAST_REFRESH: Optional[datetime] = None
 YOUTUBE_REFRESH_INTERVAL = 1800  # 30 минут
 
+# Shutdown control
+SHUTDOWN_FLAG = False
+YOUTUBE_REFRESH_TASK: Optional[asyncio.Task] = None
+
 bot: Optional[Bot] = None
 dp = Dispatcher()
 
@@ -704,30 +708,48 @@ async def refresh_youtube_visitor_data():
 
 async def youtube_cookie_refresh_loop():
     """Фоновый цикл обновления YouTube cookies."""
-    global YOUTUBE_REFRESH_INTERVAL
+    global YOUTUBE_REFRESH_INTERVAL, SHUTDOWN_FLAG
     
     # Первоначальная задержка для инициализации Playwright
     await asyncio.sleep(10)
     
-    while True:
+    while not SHUTDOWN_FLAG:
         try:
+            if SHUTDOWN_FLAG:
+                break
             await refresh_youtube_visitor_data()
+        except asyncio.CancelledError:
+            logger.info("YouTube cookie refresh loop cancelled")
+            break
         except Exception as e:
+            if SHUTDOWN_FLAG:
+                break
             logger.error(f"Ошибка в цикле обновления YouTube cookies: {e}")
         
         # Ждём перед следующим обновлением
-        await asyncio.sleep(YOUTUBE_REFRESH_INTERVAL)
+        try:
+            await asyncio.sleep(YOUTUBE_REFRESH_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("YouTube cookie refresh loop cancelled during sleep")
+            break
 
 
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube через yt-dlp с автоматическими cookies."""
-    global YOUTUBE_VISITOR_DATA
+    global YOUTUBE_VISITOR_DATA, YOUTUBE_COOKIES_LAST_REFRESH
     
     logger.info(f"Скачивание YouTube: {url[:60]}... (качество={quality})")
     
-    # Проверяем, нужно ли обновить cookies
-    if YOUTUBE_COOKIES_LAST_REFRESH is None:
-        logger.info("Первый запуск - обновляем YouTube cookies...")
+    # Проверяем возраст cookies - обновляем если старше 25 минут
+    cookies_age_ok = True
+    if YOUTUBE_COOKIES_LAST_REFRESH:
+        age_seconds = (datetime.now() - YOUTUBE_COOKIES_LAST_REFRESH).total_seconds()
+        if age_seconds > 1500:  # 25 минут
+            cookies_age_ok = False
+            logger.info(f"Cookies устарели ({age_seconds/60:.1f} мин) - обновляем...")
+    
+    # Первый запуск или устаревшие cookies
+    if YOUTUBE_COOKIES_LAST_REFRESH is None or not cookies_age_ok:
         await refresh_youtube_visitor_data()
     
     async def _try_ydl(use_cookies: bool, player_clients: List[str]) -> Optional[str]:
@@ -748,6 +770,25 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                 ydl_opts_retry.pop('impersonate', None)
                 return await asyncio.to_thread(_ydl_download_path, url, ydl_opts_retry)
             raise
+    
+    # Паттерны ошибок, требующих обновления cookies
+    BLOCK_PATTERNS = [
+        "Sign in",
+        "bot",
+        "confirm you're not",
+        "age-restricted",
+        "login required",
+        "private video",
+        "This video is unavailable",
+        "Video unavailable",
+        "blocked",
+        "403",
+        "HTTP Error 403",
+    ]
+    
+    def _is_block_error(error: Exception) -> bool:
+        err_str = str(error).lower()
+        return any(pattern.lower() in err_str for pattern in BLOCK_PATTERNS)
     
     # Пробуем с cookies, затем без
     attempts = [
@@ -770,18 +811,22 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
             last_error = e
             logger.warning(f"yt-dlp client={clients[0]} cookies={use_cookies}: {str(e)[:100]}")
     
-    # Если все попытки провалились, пробуем обновить cookies и ещё раз
-    if last_error and "Sign in" in str(last_error):
-        logger.info("Обновляем cookies и пробуем снова...")
-        await refresh_youtube_visitor_data()
+    # Если все попытки провалились и это ошибка блокировки - обновляем cookies
+    if last_error and _is_block_error(last_error):
+        logger.info("Обнаружена блокировка! Обновляем cookies и пробуем снова...")
+        refresh_success = await refresh_youtube_visitor_data()
         
-        try:
-            result = await _try_ydl(use_cookies=True, player_clients=["web"])
-            if result:
-                logger.info("YouTube скачан после обновления cookies!")
-                return result
-        except Exception as e:
-            logger.error(f"Не удалось после обновления cookies: {e}")
+        if refresh_success:
+            # Пробуем все варианты заново с новыми cookies
+            retry_clients = [["web"], ["ios"], ["android"]]
+            for clients in retry_clients:
+                try:
+                    result = await _try_ydl(use_cookies=True, player_clients=clients)
+                    if result:
+                        logger.info(f"YouTube скачан после обновления cookies! (client={clients[0]})")
+                        return result
+                except Exception as e:
+                    logger.warning(f"Retry after refresh client={clients[0]}: {str(e)[:80]}")
     
     logger.error("Все методы скачивания YouTube исчерпаны")
     return None
@@ -2144,10 +2189,43 @@ async def handle_link(message: Message):
 
 # ==================== ЗАПУСК БОТА ====================
 
+async def shutdown_cleanup():
+    """Очистка ресурсов при завершении"""
+    global SHUTDOWN_FLAG, YOUTUBE_REFRESH_TASK, IG_BROWSER, YT_BROWSER
+    
+    logger.info("Начало cleanup...")
+    SHUTDOWN_FLAG = True
+    
+    # Отменяем фоновую задачу
+    if YOUTUBE_REFRESH_TASK and not YOUTUBE_REFRESH_TASK.done():
+        YOUTUBE_REFRESH_TASK.cancel()
+        try:
+            await asyncio.wait_for(YOUTUBE_REFRESH_TASK, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    
+    # Закрываем браузеры
+    if IG_BROWSER:
+        try:
+            await IG_BROWSER.close()
+        except Exception as e:
+            logger.debug(f"Error closing IG browser: {e}")
+    
+    if YT_BROWSER:
+        try:
+            await YT_BROWSER.close()
+        except Exception as e:
+            logger.debug(f"Error closing YT browser: {e}")
+    
+    logger.info("Cleanup завершён")
+
+
 async def main():
     """Основная функция запуска"""
-    global bot
+    global bot, YOUTUBE_REFRESH_TASK, SHUTDOWN_FLAG
     logger.info("Запуск бота...")
+    
+    SHUTDOWN_FLAG = False
     
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не найден в переменных окружения")
@@ -2161,7 +2239,7 @@ async def main():
     await init_youtube_playwright()
     
     # Запускаем фоновую задачу обновления YouTube cookies
-    asyncio.create_task(youtube_cookie_refresh_loop())
+    YOUTUBE_REFRESH_TASK = asyncio.create_task(youtube_cookie_refresh_loop())
     logger.info("Фоновое обновление YouTube cookies запущено")
     
     bot = Bot(token=BOT_TOKEN, session=AiohttpSession())
@@ -2223,12 +2301,8 @@ async def main():
             save_user_settings()
             save_users_data()
             save_referrals()
+            await shutdown_cleanup()
             logger.info("Бот остановлен")
-    
-    if IG_BROWSER:
-        await IG_BROWSER.close()
-    if YT_BROWSER:
-        await YT_BROWSER.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
