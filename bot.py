@@ -59,6 +59,7 @@ IG_PLAYWRIGHT_READY = False
 
 # YouTube Auto-Cookie Refresh
 YOUTUBE_VISITOR_DATA: Optional[str] = None
+YOUTUBE_PO_TOKEN: Optional[str] = None  # Proof of Origin token for bot bypass
 YOUTUBE_COOKIES_LAST_REFRESH: Optional[datetime] = None
 YOUTUBE_REFRESH_INTERVAL = 1800  # 30 минут
 
@@ -647,29 +648,72 @@ def _ydl_download_path(url: str, ydl_opts: Dict[str, Any]) -> Optional[str]:
 # ==================== YOUTUBE DOWNLOADER ====================
 
 async def refresh_youtube_visitor_data():
-    """Обновляет YouTube visitor_data через Playwright."""
-    global YOUTUBE_VISITOR_DATA, YOUTUBE_COOKIES_LAST_REFRESH, YT_CONTEXT, YT_PLAYWRIGHT_READY
+    """Обновляет YouTube visitor_data и PO Token через Playwright с перехватом сетевых запросов."""
+    global YOUTUBE_VISITOR_DATA, YOUTUBE_PO_TOKEN, YOUTUBE_COOKIES_LAST_REFRESH, YT_CONTEXT, YT_PLAYWRIGHT_READY
     
     if not YT_PLAYWRIGHT_READY or not YT_CONTEXT:
         logger.warning("YouTube Playwright не готов для обновления cookies")
         return False
     
     page = None
+    captured_po_token = None
+    captured_visitor_data = None
+    
+    async def handle_response(response):
+        """Перехватываем ответы от YouTube API для извлечения PO Token."""
+        nonlocal captured_po_token, captured_visitor_data
+        try:
+            url = response.url
+            # Ищем запросы к player API или innertube
+            if 'youtubei/v1/player' in url or 'youtubei/v1/next' in url:
+                try:
+                    body = await response.body()
+                    text = body.decode('utf-8', errors='ignore')
+                    data = json.loads(text)
+                    
+                    # Извлекаем PO Token из serviceIntegrityDimensions
+                    sid = data.get('serviceIntegrityDimensions', {})
+                    po_token = sid.get('poToken')
+                    if po_token and not captured_po_token:
+                        captured_po_token = po_token
+                        logger.info(f"Захвачен PO Token: {po_token[:30]}...")
+                    
+                    # Извлекаем visitorData из responseContext
+                    rc = data.get('responseContext', {})
+                    vd = rc.get('visitorData')
+                    if vd and not captured_visitor_data:
+                        captured_visitor_data = vd
+                        logger.info(f"Захвачен visitorData из API: {vd[:20]}...")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
     try:
-        logger.info("Обновление YouTube visitor_data...")
+        logger.info("Обновление YouTube visitor_data и PO Token...")
         page = await YT_CONTEXT.new_page()
+        
+        # Подписываемся на ответы до навигации
+        page.on('response', handle_response)
         
         # Устанавливаем дополнительные заголовки для обхода детекции бота
         await page.set_extra_http_headers({
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
         })
         
         # Заходим на YouTube
         await page.goto("https://www.youtube.com", wait_until='domcontentloaded', timeout=30000)
         await page.wait_for_timeout(2000)
         
-        # Принимаем consent если есть - расширенный список селекторов
+        # Принимаем consent если есть
         consent_selectors = [
             'button[aria-label*="Accept"]',
             'button[aria-label*="accept"]',
@@ -679,7 +723,7 @@ async def refresh_youtube_visitor_data():
             'button:has-text("Agree")',
             'button:has-text("Принять все")',
             'button:has-text("Согласен")',
-            'button:has-text("Reject all")',  # Иногда нужно отклонить
+            'button:has-text("Reject all")',
             '[aria-label="Accept the use of cookies and other data for the purposes described"]',
             'form[action*="consent"] button',
             'ytd-consent-bump-v2-lightbox button.yt-spec-button-shape-next--call-to-action',
@@ -696,44 +740,52 @@ async def refresh_youtube_visitor_data():
             except Exception:
                 continue
         
-        # Ждём полной загрузки
+        # Ждём полной загрузки главной
         await page.wait_for_timeout(3000)
         
-        # Пробуем перейти на видео для получения cookies
-        try:
-            # Ищем любое видео на главной
-            video_link = page.locator('a#thumbnail[href*="watch"]').first
-            if await video_link.is_visible(timeout=2000):
-                await video_link.click()
-                await page.wait_for_timeout(3000)
-        except Exception:
-            pass
+        # Переходим на популярное видео Shorts для получения PO Token
+        # Shorts обычно лучше загружаются и дают токены
+        test_video_urls = [
+            "https://www.youtube.com/shorts/2g811Eo7K8U",  # Популярный shorts
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",  # Rick Roll (всегда работает)
+        ]
+        
+        for test_url in test_video_urls:
+            try:
+                await page.goto(test_url, wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(5000)  # Ждём загрузки плеера и API запросов
+                
+                # Проверяем получили ли мы токены
+                if captured_po_token:
+                    break
+            except Exception as e:
+                logger.debug(f"Ошибка загрузки тестового видео {test_url}: {e}")
+                continue
         
         # Извлекаем cookies
         cookies = await page.context.cookies()
         
-        visitor_data = None
-        for cookie in cookies:
-            if cookie.get('name') == 'VISITOR_INFO1_LIVE':
-                visitor_data = cookie.get('value')
-                break
+        visitor_data = captured_visitor_data
         
-        # Если cookie не найден, пробуем извлечь visitor_data из JavaScript
+        # Если не захватили visitor_data из API, ищем в cookies
+        if not visitor_data:
+            for cookie in cookies:
+                if cookie.get('name') == 'VISITOR_INFO1_LIVE':
+                    visitor_data = cookie.get('value')
+                    break
+        
+        # Если всё ещё нет, пробуем извлечь из JavaScript
         if not visitor_data:
             try:
-                # YouTube хранит visitor_data в ytInitialData
                 visitor_data = await page.evaluate('''() => {
                     try {
-                        // Вариант 1: из ytcfg
                         if (typeof ytcfg !== 'undefined' && ytcfg.get) {
                             const vd = ytcfg.get('VISITOR_DATA');
                             if (vd) return vd;
                         }
-                        // Вариант 2: из window.yt
                         if (window.yt && window.yt.config_ && window.yt.config_.VISITOR_DATA) {
                             return window.yt.config_.VISITOR_DATA;
                         }
-                        // Вариант 3: из ytInitialData
                         if (typeof ytInitialData !== 'undefined' && ytInitialData.responseContext) {
                             const visitorData = ytInitialData.responseContext.visitorData;
                             if (visitorData) return visitorData;
@@ -748,13 +800,23 @@ async def refresh_youtube_visitor_data():
             except Exception as e:
                 logger.debug(f"Не удалось извлечь visitor_data из JS: {e}")
         
+        # Обновляем глобальные переменные
+        success = False
         if visitor_data:
             YOUTUBE_VISITOR_DATA = visitor_data
             YOUTUBE_COOKIES_LAST_REFRESH = datetime.now()
             logger.info(f"YouTube visitor_data обновлён: {visitor_data[:20]}...")
-            
-            # Также сохраняем cookies в файл для yt-dlp
+            success = True
+        
+        if captured_po_token:
+            YOUTUBE_PO_TOKEN = captured_po_token
+            logger.info(f"YouTube PO Token сохранён")
+            success = True
+        
+        if success:
+            # Сохраняем cookies в файл для yt-dlp
             cookie_file = "cookies_youtube.txt"
+            one_year_from_now = int(time.time()) + 365 * 24 * 60 * 60
             with open(cookie_file, 'w', encoding='utf-8') as f:
                 f.write("# Netscape HTTP Cookie File\n")
                 for cookie in cookies:
@@ -763,25 +825,30 @@ async def refresh_youtube_visitor_data():
                         flag = 'TRUE' if domain.startswith('.') else 'FALSE'
                         path = cookie.get('path', '/')
                         secure = 'TRUE' if cookie.get('secure') else 'FALSE'
-                        expires = int(cookie.get('expires', 0)) if cookie.get('expires') else 0
+                        raw_expires = cookie.get('expires')
+                        if raw_expires and isinstance(raw_expires, (int, float)) and raw_expires > time.time():
+                            expires = int(raw_expires)
+                        else:
+                            expires = one_year_from_now
                         name = cookie.get('name', '')
                         value = cookie.get('value', '')
-                        f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+                        if name and value:
+                            f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
             
             logger.info(f"YouTube cookies сохранены в {cookie_file}")
             return True
         else:
-            # Логируем какие cookies мы получили для отладки
             cookie_names = [c.get('name') for c in cookies if 'youtube' in c.get('domain', '') or 'google' in c.get('domain', '')]
-            logger.warning(f"VISITOR_INFO1_LIVE не найден. Доступные cookies: {cookie_names[:10]}")
+            logger.warning(f"Не удалось получить токены. Доступные cookies: {cookie_names[:10]}")
             return False
             
     except Exception as e:
-        logger.error(f"Ошибка обновления YouTube visitor_data: {e}")
+        logger.error(f"Ошибка обновления YouTube токенов: {e}")
         return False
     finally:
         if page:
             try:
+                page.remove_listener('response', handle_response)
                 await page.close()
             except Exception:
                 pass
@@ -818,7 +885,7 @@ async def youtube_cookie_refresh_loop():
 
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube через yt-dlp + внешние API."""
-    global YOUTUBE_VISITOR_DATA, YOUTUBE_COOKIES_LAST_REFRESH
+    global YOUTUBE_VISITOR_DATA, YOUTUBE_PO_TOKEN, YOUTUBE_COOKIES_LAST_REFRESH
     
     logger.info(f"Скачивание YouTube: {url[:60]}... (качество={quality})")
     
@@ -835,11 +902,20 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     async def _try_ydl() -> Optional[str]:
         ydl_opts = get_ydl_opts(quality, use_youtube_cookies=True)
         
-        # Добавляем visitor_data если есть
+        # Добавляем visitor_data и PO Token если есть
+        ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
+        ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
+        
         if YOUTUBE_VISITOR_DATA:
-            ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
-            ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
             ydl_opts['extractor_args']['youtube']['visitor_data'] = [YOUTUBE_VISITOR_DATA]
+        
+        # Добавляем PO Token для обхода детекции бота
+        # Формат: web.gvs+TOKEN или mweb.gvs+TOKEN
+        if YOUTUBE_PO_TOKEN:
+            # mweb.gvs для мобильного клиента который обычно лучше работает
+            po_token_value = f"mweb.gvs+{YOUTUBE_PO_TOKEN}"
+            ydl_opts['extractor_args']['youtube']['po_token'] = [po_token_value]
+            logger.debug(f"Используем PO Token для yt-dlp")
         
         try:
             return await asyncio.to_thread(_ydl_download_path, url, ydl_opts)
@@ -898,45 +974,68 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         logger.error("Не удалось извлечь video_id")
         return None
     
-    # API 1: Cobalt.tools (обновлённый endpoint)
+    # API 1: Cobalt.tools (v7 API)
     async def try_cobalt() -> Optional[str]:
         logger.info("Пробуем Cobalt API...")
         async with aiohttp.ClientSession() as session:
             try:
                 payload = {
                     "url": f"https://www.youtube.com/watch?v={video_id}",
-                    "videoQuality": "720" if quality == "720p" else "1080" if quality == "1080p" else "max",
-                    "filenameStyle": "basic",
                     "downloadMode": "auto",
+                    "filenameStyle": "basic",
+                    "videoQuality": "720" if quality == "720p" else "1080" if quality == "1080p" else "max",
                 }
+                
+                # Cobalt v7 API требует специальные заголовки
                 headers = {
                     "Accept": "application/json",
                     "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
                 }
-                # Пробуем несколько эндпоинтов Cobalt
+                
+                # Актуальные эндпоинты Cobalt
                 endpoints = [
-                    "https://api.cobalt.tools/",
-                    "https://co.wuk.sh/api/json",
+                    ("https://api.cobalt.tools/", {"Accept": "application/json", "Content-Type": "application/json"}),
+                    ("https://cobalt-api.hyper.lol/", {"Accept": "application/json", "Content-Type": "application/json"}),
+                    ("https://co.wuk.sh/api/json", {"Accept": "application/json", "Content-Type": "application/json"}),
                 ]
-                for endpoint in endpoints:
+                
+                for endpoint, extra_headers in endpoints:
                     try:
+                        req_headers = {**headers, **extra_headers}
                         async with session.post(
                             endpoint,
                             json=payload,
-                            headers=headers,
+                            headers=req_headers,
                             timeout=aiohttp.ClientTimeout(total=30)
                         ) as resp:
                             resp_text = await resp.text()
                             logger.debug(f"Cobalt {endpoint} status={resp.status}")
+                            
                             if resp.status == 200:
                                 try:
                                     data = json.loads(resp_text)
                                 except:
                                     continue
-                                download_url = data.get("url") or data.get("stream") or data.get("audio")
+                                
+                                status = data.get("status")
+                                
+                                # Обработка разных типов ответов Cobalt v7
+                                if status == "tunnel" or status == "redirect":
+                                    download_url = data.get("url")
+                                elif status == "picker":
+                                    # Picker возвращает список вариантов
+                                    picker = data.get("picker", [])
+                                    if picker:
+                                        download_url = picker[0].get("url")
+                                    else:
+                                        download_url = None
+                                else:
+                                    # Старый формат
+                                    download_url = data.get("url") or data.get("stream") or data.get("audio")
+                                
                                 if download_url:
-                                    logger.info(f"Cobalt вернул URL, скачиваем...")
+                                    logger.info(f"Cobalt вернул URL ({status}), скачиваем...")
                                     async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as dl_resp:
                                         if dl_resp.status == 200:
                                             temp_dir = tempfile.mkdtemp()
@@ -948,7 +1047,9 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                                                 logger.info("Скачано через Cobalt!")
                                                 return temp_file
                                 else:
-                                    logger.debug(f"Cobalt ответ без URL: {resp_text[:200]}")
+                                    logger.debug(f"Cobalt ответ: status={status}, данные: {resp_text[:200]}")
+                            elif resp.status == 400:
+                                logger.debug(f"Cobalt 400: {resp_text[:200]}")
                     except Exception as ep_e:
                         logger.debug(f"Cobalt endpoint {endpoint} ошибка: {ep_e}")
                         continue
@@ -1138,6 +1239,72 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
             logger.debug("pytubefix не установлен")
         except Exception as e:
             logger.warning(f"pytubefix ошибка: {e}")
+        return None
+    
+    # API 6: Invidious (бесплатные инстансы)
+    async def try_invidious() -> Optional[str]:
+        logger.info("Пробуем Invidious API...")
+        # Список рабочих инстансов Invidious
+        invidious_instances = [
+            "https://invidious.fdn.fr",
+            "https://inv.nadeko.net",
+            "https://invidious.protokolla.fi",
+            "https://vid.puffyan.us",
+            "https://yewtu.be",
+        ]
+        
+        async with aiohttp.ClientSession() as session:
+            for instance in invidious_instances:
+                try:
+                    # Получаем информацию о видео
+                    api_url = f"{instance}/api/v1/videos/{video_id}"
+                    async with session.get(
+                        api_url,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        
+                        data = await resp.json()
+                        
+                        # Ищем подходящий формат для скачивания
+                        adaptive_formats = data.get("adaptiveFormats", [])
+                        format_streams = data.get("formatStreams", [])
+                        
+                        download_url = None
+                        
+                        # Сначала ищем в formatStreams (progressive - видео+аудио)
+                        for fmt in format_streams:
+                            quality_label = fmt.get("qualityLabel", "")
+                            if "720" in quality_label or "480" in quality_label or "360" in quality_label:
+                                download_url = fmt.get("url")
+                                if download_url:
+                                    break
+                        
+                        # Если не нашли, берём первый доступный
+                        if not download_url and format_streams:
+                            download_url = format_streams[0].get("url")
+                        
+                        if download_url:
+                            logger.info(f"Invidious ({instance}) вернул URL, скачиваем...")
+                            async with session.get(
+                                download_url,
+                                timeout=aiohttp.ClientTimeout(total=300),
+                                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+                            ) as dl_resp:
+                                if dl_resp.status == 200:
+                                    temp_dir = tempfile.mkdtemp()
+                                    temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+                                    with open(temp_file, 'wb') as f:
+                                        async for chunk in dl_resp.content.iter_chunked(8192):
+                                            f.write(chunk)
+                                    if os.path.getsize(temp_file) > 10000:
+                                        logger.info(f"Скачано через Invidious ({instance})!")
+                                        return temp_file
+                except Exception as e:
+                    logger.debug(f"Invidious {instance} ошибка: {e}")
+                    continue
         return None
     
     # Пробуем pytubefix первым (самый надёжный)
