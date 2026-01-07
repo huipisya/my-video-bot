@@ -1209,26 +1209,103 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         try:
             from pytubefix import YouTube
             from pytubefix.cli import on_progress
+            import subprocess
             
             def _download_with_pytubefix():
                 yt = YouTube(url, on_progress_callback=on_progress)
                 
                 # Выбираем качество
                 if quality == "audio":
-                    stream = yt.streams.filter(only_audio=True).first()
-                else:
-                    # Сначала пробуем progressive (видео+аудио вместе)
-                    stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-                    
-                    if not stream:
-                        # Если нет progressive, берём adaptive
-                        stream = yt.streams.filter(adaptive=True, file_extension='mp4').order_by('resolution').desc().first()
+                    stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
+                    if stream:
+                        temp_dir = tempfile.mkdtemp()
+                        output_path = stream.download(output_path=temp_dir)
+                        if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            return output_path
+                    return None
                 
-                if stream:
-                    temp_dir = tempfile.mkdtemp()
-                    output_path = stream.download(output_path=temp_dir)
+                # Определяем целевое разрешение
+                quality_map = {
+                    'best': 9999,
+                    '1080p': 1080,
+                    '720p': 720,
+                    '480p': 480,
+                }
+                target_height = quality_map.get(quality.lower(), 720)
+                
+                temp_dir = tempfile.mkdtemp()
+                
+                # Пробуем adaptive потоки (высокое качество)
+                # Adaptive потоки имеют видео без аудио, но в высоком разрешении
+                video_streams = yt.streams.filter(adaptive=True, file_extension='mp4', only_video=True).order_by('resolution').desc()
+                
+                # Выбираем поток с подходящим разрешением
+                video_stream = None
+                for stream in video_streams:
+                    stream_height = stream.resolution
+                    if stream_height:
+                        try:
+                            height = int(stream_height.replace('p', ''))
+                            if target_height == 9999 or height <= target_height:
+                                video_stream = stream
+                                break
+                        except:
+                            continue
+                
+                if not video_stream:
+                    video_stream = video_streams.first()
+                
+                if video_stream:
+                    # Скачиваем видео
+                    video_path = video_stream.download(output_path=temp_dir, filename_prefix='video_')
+                    logger.info(f"Скачано видео: {video_stream.resolution}")
+                    
+                    # Скачиваем аудио
+                    audio_stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
+                    if audio_stream and video_path:
+                        audio_path = audio_stream.download(output_path=temp_dir, filename_prefix='audio_')
+                        logger.info(f"Скачано аудио: {audio_stream.abr}")
+                        
+                        # Объединяем видео и аудио через ffmpeg
+                        output_path = os.path.join(temp_dir, 'merged_output.mp4')
+                        try:
+                            cmd = [
+                                'ffmpeg', '-y',
+                                '-i', video_path,
+                                '-i', audio_path,
+                                '-c:v', 'copy',
+                                '-c:a', 'aac',
+                                '-strict', 'experimental',
+                                output_path
+                            ]
+                            subprocess.run(cmd, capture_output=True, timeout=120)
+                            
+                            # Удаляем временные файлы
+                            try:
+                                os.remove(video_path)
+                                os.remove(audio_path)
+                            except:
+                                pass
+                            
+                            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                                return output_path
+                        except Exception as e:
+                            logger.warning(f"ffmpeg merge ошибка: {e}")
+                            # Если не удалось объединить, возвращаем видео без звука
+                            if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+                                return video_path
+                    elif video_path and os.path.exists(video_path):
+                        # Если аудио нет, возвращаем видео
+                        return video_path
+                
+                # Fallback: progressive поток (низкое качество, но со звуком)
+                progressive_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+                if progressive_stream:
+                    output_path = progressive_stream.download(output_path=temp_dir)
+                    logger.info(f"Скачано через progressive: {progressive_stream.resolution}")
                     if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
                         return output_path
+                
                 return None
             
             result = await asyncio.to_thread(_download_with_pytubefix)
