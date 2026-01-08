@@ -66,6 +66,12 @@ YOUTUBE_REFRESH_INTERVAL = 1800  # 30 минут
 # Shutdown control
 SHUTDOWN_FLAG = False
 YOUTUBE_REFRESH_TASK: Optional[asyncio.Task] = None
+INSTAGRAM_REFRESH_TASK: Optional[asyncio.Task] = None
+
+# Instagram Auto-Cookie Refresh
+INSTAGRAM_COOKIES_LAST_REFRESH: Optional[datetime] = None
+INSTAGRAM_REFRESH_INTERVAL = 1800  # 30 минут
+INSTAGRAM_SESSION_ID: Optional[str] = None
 
 bot: Optional[Bot] = None
 dp = Dispatcher()
@@ -883,6 +889,143 @@ async def youtube_cookie_refresh_loop():
             break
 
 
+async def refresh_instagram_cookies():
+    """Обновляет Instagram cookies через Playwright."""
+    global IG_CONTEXT, IG_PLAYWRIGHT_READY, INSTAGRAM_COOKIES_LAST_REFRESH, INSTAGRAM_SESSION_ID
+    
+    if not IG_PLAYWRIGHT_READY or not IG_CONTEXT:
+        logger.warning("Instagram Playwright не готов для обновления cookies")
+        return False
+    
+    page = None
+    try:
+        logger.info("Обновление Instagram cookies...")
+        page = await IG_CONTEXT.new_page()
+        
+        # Устанавливаем мобильный viewport
+        await page.set_viewport_size({"width": 375, "height": 812})
+        
+        # Заходим на Instagram главную
+        await page.goto("https://www.instagram.com/", wait_until='domcontentloaded', timeout=30000)
+        await page.wait_for_timeout(3000)
+        
+        # Принимаем cookies политику если есть
+        cookie_accept_selectors = [
+            'button[tabindex="0"]:has-text("Allow")',
+            'button:has-text("Accept")',
+            'button:has-text("Allow essential and optional cookies")',
+            '[role="button"]:has-text("Accept")',
+        ]
+        
+        for selector in cookie_accept_selectors:
+            try:
+                btn = page.locator(selector).first
+                if await btn.is_visible(timeout=1000):
+                    await btn.click()
+                    logger.info(f"Нажата кнопка cookie consent: {selector[:50]}")
+                    await page.wait_for_timeout(1000)
+                    break
+            except Exception:
+                continue
+        
+        # Ждём загрузки страницы
+        await page.wait_for_timeout(2000)
+        
+        # Переходим на какой-нибудь публичный Reel для активации сессии
+        test_urls = [
+            "https://www.instagram.com/reels/",
+            "https://www.instagram.com/explore/",
+        ]
+        
+        for test_url in test_urls:
+            try:
+                await page.goto(test_url, wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(3000)
+                break
+            except Exception:
+                continue
+        
+        # Извлекаем cookies
+        cookies = await page.context.cookies()
+        
+        # Ищем sessionid и другие важные cookies
+        session_id = None
+        important_cookies = []
+        for cookie in cookies:
+            domain = cookie.get('domain', '')
+            if 'instagram' in domain:
+                important_cookies.append(cookie)
+                if cookie.get('name') == 'sessionid':
+                    session_id = cookie.get('value')
+                    INSTAGRAM_SESSION_ID = session_id
+                    logger.info(f"Instagram sessionid получен: {session_id[:15]}...")
+        
+        if important_cookies:
+            # Сохраняем cookies в файл для yt-dlp
+            cookie_file = "cookies_instagram.txt"
+            one_year_from_now = int(time.time()) + 365 * 24 * 60 * 60
+            with open(cookie_file, 'w', encoding='utf-8') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                for cookie in important_cookies:
+                    domain = cookie.get('domain', '')
+                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                    path = cookie.get('path', '/')
+                    secure = 'TRUE' if cookie.get('secure') else 'FALSE'
+                    raw_expires = cookie.get('expires')
+                    if raw_expires and isinstance(raw_expires, (int, float)) and raw_expires > time.time():
+                        expires = int(raw_expires)
+                    else:
+                        expires = one_year_from_now
+                    name = cookie.get('name', '')
+                    value = cookie.get('value', '')
+                    if name and value:
+                        f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+            
+            INSTAGRAM_COOKIES_LAST_REFRESH = datetime.now()
+            logger.info(f"Instagram cookies сохранены ({len(important_cookies)} cookies)")
+            return True
+        else:
+            logger.warning("Не удалось получить Instagram cookies")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Ошибка обновления Instagram cookies: {e}")
+        return False
+    finally:
+        if page:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+async def instagram_cookie_refresh_loop():
+    """Фоновый цикл обновления Instagram cookies."""
+    global INSTAGRAM_REFRESH_INTERVAL, SHUTDOWN_FLAG
+    
+    # Первоначальная задержка для инициализации Playwright
+    await asyncio.sleep(15)
+    
+    while not SHUTDOWN_FLAG:
+        try:
+            if SHUTDOWN_FLAG:
+                break
+            await refresh_instagram_cookies()
+        except asyncio.CancelledError:
+            logger.info("Instagram cookie refresh loop cancelled")
+            break
+        except Exception as e:
+            if SHUTDOWN_FLAG:
+                break
+            logger.error(f"Ошибка в цикле обновления Instagram cookies: {e}")
+        
+        # Ждём перед следующим обновлением
+        try:
+            await asyncio.sleep(INSTAGRAM_REFRESH_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("Instagram cookie refresh loop cancelled during sleep")
+            break
+
 async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
     """Скачивание с YouTube через yt-dlp + внешние API."""
     global YOUTUBE_VISITOR_DATA, YOUTUBE_PO_TOKEN, YOUTUBE_COOKIES_LAST_REFRESH
@@ -1549,14 +1692,35 @@ class InstagramDownloader:
         match = re.search(r'/(p|reel|tv|reels)/([A-Za-z0-9_-]+)', url)
         return match.group(2) if match else None
     
-    async def _download_video(self, video_url: str, session: 'aiohttp.ClientSession' = None) -> Optional[str]:
-        """Скачивает видео по прямой ссылке."""
+    async def _download_video(self, video_url: str, session: 'aiohttp.ClientSession' = None, extra_cookies: dict = None) -> Optional[str]:
+        """Скачивает видео по прямой ссылке с поддержкой cookies."""
         import aiohttp
+        global IG_CONTEXT
         
         headers = {
             'User-Agent': self.HEADERS['User-Agent'],
             'Referer': 'https://www.instagram.com/',
+            'Origin': 'https://www.instagram.com',
+            'Accept': '*/*',
         }
+        
+        # Собираем cookies
+        cookie_str = ""
+        if extra_cookies:
+            cookie_str = "; ".join(f"{k}={v}" for k, v in extra_cookies.items())
+        else:
+            # Пробуем получить cookies из Playwright контекста
+            try:
+                if IG_CONTEXT:
+                    cookies = await IG_CONTEXT.cookies()
+                    ig_cookies = {c['name']: c['value'] for c in cookies if 'instagram' in c.get('domain', '')}
+                    if ig_cookies:
+                        cookie_str = "; ".join(f"{k}={v}" for k, v in ig_cookies.items())
+            except Exception:
+                pass
+        
+        if cookie_str:
+            headers['Cookie'] = cookie_str
         
         close_session = False
         if session is None:
@@ -1574,6 +1738,8 @@ class InstagramDownloader:
                             f.write(content)
                         self.logger.info(f"Видео скачано: {len(content)} bytes")
                         return temp_file
+                else:
+                    self.logger.debug(f"Ошибка скачивания: HTTP {resp.status}")
         except Exception as e:
             self.logger.warning(f"Ошибка скачивания видео: {e}")
         finally:
@@ -1585,7 +1751,7 @@ class InstagramDownloader:
     # ==================== МЕТОД 1: YT-DLP ====================
     
     async def _method_ytdlp(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-        """Скачивание через yt-dlp (быстрый метод без cookies)."""
+        """Скачивание через yt-dlp с поддержкой cookies."""
         temp_dir = tempfile.mkdtemp(prefix="ig_ytdlp_")
         
         ydl_opts = {
@@ -1597,11 +1763,18 @@ class InstagramDownloader:
             'ignoreerrors': False,
             'extract_flat': False,
             'socket_timeout': 15,
+            'retries': 3,
             'http_headers': {
                 'User-Agent': self.HEADERS['User-Agent'],
                 'Referer': 'https://www.instagram.com/',
             }
         }
+        
+        # Добавляем cookies если есть
+        cookie_file = "cookies_instagram.txt"
+        if os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0:
+            ydl_opts['cookiefile'] = cookie_file
+            self.logger.debug(f"Используем Instagram cookies из {cookie_file}")
         
         try:
             info = await asyncio.to_thread(self._ytdlp_extract, url, ydl_opts)
@@ -2690,11 +2863,18 @@ async def shutdown_cleanup():
     logger.info("Начало cleanup...")
     SHUTDOWN_FLAG = True
     
-    # Отменяем фоновую задачу
+    # Отменяем фоновые задачи
     if YOUTUBE_REFRESH_TASK and not YOUTUBE_REFRESH_TASK.done():
         YOUTUBE_REFRESH_TASK.cancel()
         try:
             await asyncio.wait_for(YOUTUBE_REFRESH_TASK, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    
+    if INSTAGRAM_REFRESH_TASK and not INSTAGRAM_REFRESH_TASK.done():
+        INSTAGRAM_REFRESH_TASK.cancel()
+        try:
+            await asyncio.wait_for(INSTAGRAM_REFRESH_TASK, timeout=2.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
     
@@ -2716,7 +2896,7 @@ async def shutdown_cleanup():
 
 async def main():
     """Основная функция запуска"""
-    global bot, YOUTUBE_REFRESH_TASK, SHUTDOWN_FLAG
+    global bot, YOUTUBE_REFRESH_TASK, INSTAGRAM_REFRESH_TASK, SHUTDOWN_FLAG
     logger.info("Запуск бота...")
     
     SHUTDOWN_FLAG = False
@@ -2732,9 +2912,12 @@ async def main():
     await init_instagram_playwright()
     await init_youtube_playwright()
     
-    # Запускаем фоновую задачу обновления YouTube cookies
+    # Запускаем фоновые задачи обновления cookies
     YOUTUBE_REFRESH_TASK = asyncio.create_task(youtube_cookie_refresh_loop())
     logger.info("Фоновое обновление YouTube cookies запущено")
+    
+    INSTAGRAM_REFRESH_TASK = asyncio.create_task(instagram_cookie_refresh_loop())
+    logger.info("Фоновое обновление Instagram cookies запущено")
     
     bot = Bot(token=BOT_TOKEN, session=AiohttpSession())
     
