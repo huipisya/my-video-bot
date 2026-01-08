@@ -84,6 +84,7 @@ REFERRALS_FILE = 'referrals.json'
 user_settings = {}
 users_data = {}  # {user_id: {premium: bool, premium_until: timestamp, downloads_today: int, last_download_date: str, referral_code: str, referred_by: user_id}}
 referrals = {}  # {referral_code: user_id}
+instagram_descriptions = {}  # {message_id: description} - для кнопки "ПОЛУЧИТЬ ОПИСАНИЕ"
 
 # Константы
 FREE_DAILY_LIMIT = 1488
@@ -2342,6 +2343,14 @@ def limit_reached_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def get_description_keyboard(message_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура с кнопкой получения описания Instagram"""
+    buttons = [
+        [InlineKeyboardButton(text="ПОЛУЧИТЬ ОПИСАНИЕ", 
+                             callback_data=f"get_desc_{message_id}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def conditions_keyboard(is_premium_user: bool) -> InlineKeyboardMarkup:
     """Клавиатура условий использования"""
     if is_premium_user:
@@ -2644,6 +2653,137 @@ async def process_how_referral_works(callback: CallbackQuery):
     )
 
 
+@dp.callback_query(F.data.startswith("get_desc_"))
+async def process_get_description(callback: CallbackQuery):
+    """Обработчик получения описания Instagram поста"""
+    global instagram_descriptions
+    
+    await callback.answer()
+    
+    # Извлекаем message_id из callback_data
+    try:
+        message_id = int(callback.data.replace("get_desc_", ""))
+    except ValueError:
+        await callback.message.reply("Ошибка: неверный идентификатор сообщения.")
+        return
+    
+    description = instagram_descriptions.get(message_id, "")
+    
+    if description:
+        # Ограничиваем длину описания
+        if len(description) > 4000:
+            description = description[:4000] + "..."
+        
+        await callback.message.reply(
+            f"<b>Описание:</b>\n\n{description}",
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.reply("Описание не найдено или пустое.")
+    
+    # Удаляем из памяти после использования
+    instagram_descriptions.pop(message_id, None)
+
+
+async def send_video_with_description_button(chat_id: int, file_path: str, description: str = "") -> Optional[Message]:
+    """Отправляет видео с кнопкой получения описания"""
+    global instagram_descriptions
+    
+    max_telegram_file_size = 50 * 1024 * 1024
+    file_size = os.path.getsize(file_path)
+    
+    # Исправляем метаданные видео
+    if file_path.lower().endswith(('.mp4', '.mkv', '.webm', '.mov')):
+        fixed_path = await fix_video_for_telegram(file_path)
+        if fixed_path and fixed_path != file_path:
+            file_path = fixed_path
+            file_size = os.path.getsize(file_path)
+    
+    keyboard = None
+    
+    if file_size > max_telegram_file_size:
+        link = await upload_to_0x0(file_path)
+        if not link:
+            link = await upload_to_uguu(file_path)
+        if link:
+            sent_msg = await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
+            if description:
+                instagram_descriptions[sent_msg.message_id] = description
+                keyboard = get_description_keyboard(sent_msg.message_id)
+                await sent_msg.edit_reply_markup(reply_markup=keyboard)
+            return sent_msg
+        else:
+            await bot.send_message(chat_id, "Не удалось загрузить файл.")
+            return None
+    else:
+        input_file = FSInputFile(file_path)
+        keyboard = get_description_keyboard(0) if description else None  # временная клавиатура
+        
+        try:
+            sent_msg = await bot.send_video(chat_id=chat_id, video=input_file, supports_streaming=True)
+            
+            if description:
+                instagram_descriptions[sent_msg.message_id] = description
+                keyboard = get_description_keyboard(sent_msg.message_id)
+                await sent_msg.edit_reply_markup(reply_markup=keyboard)
+            
+            return sent_msg
+        except TelegramBadRequest as e:
+            if "Wrong type of the web page content" in str(e):
+                try:
+                    sent_msg = await bot.send_photo(chat_id=chat_id, photo=input_file)
+                    if description:
+                        instagram_descriptions[sent_msg.message_id] = description
+                        keyboard = get_description_keyboard(sent_msg.message_id)
+                        await sent_msg.edit_reply_markup(reply_markup=keyboard)
+                    return sent_msg
+                except TelegramBadRequest:
+                    sent_msg = await bot.send_document(chat_id=chat_id, document=input_file)
+                    if description:
+                        instagram_descriptions[sent_msg.message_id] = description
+                        keyboard = get_description_keyboard(sent_msg.message_id)
+                        await sent_msg.edit_reply_markup(reply_markup=keyboard)
+                    return sent_msg
+            else:
+                try:
+                    sent_msg = await bot.send_document(chat_id=chat_id, document=input_file)
+                    if description:
+                        instagram_descriptions[sent_msg.message_id] = description
+                        keyboard = get_description_keyboard(sent_msg.message_id)
+                        await sent_msg.edit_reply_markup(reply_markup=keyboard)
+                    return sent_msg
+                except Exception:
+                    await bot.send_message(chat_id, "Ошибка при отправке файла.")
+    return None
+
+
+async def send_photos_with_description_button(chat_id: int, photos: List[str], description: str = "") -> Optional[Message]:
+    """Отправляет фото с кнопкой получения описания"""
+    global instagram_descriptions
+    
+    media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
+    
+    batch_size = 10
+    last_messages = None
+    for i in range(0, len(media_group), batch_size):
+        batch = media_group[i:i + batch_size]
+        last_messages = await bot.send_media_group(chat_id=chat_id, media=batch)
+    
+    # После отправки media_group отправляем кнопку отдельным сообщением
+    if description and last_messages:
+        # Создаём отдельное сообщение с кнопкой - используем временный ID
+        temp_id = last_messages[-1].message_id
+        keyboard_msg = await bot.send_message(
+            chat_id, 
+            "---",
+            reply_markup=get_description_keyboard(temp_id)
+        )
+        # Сохраняем описание по ID сообщения с кнопкой
+        instagram_descriptions[temp_id] = description
+    
+    return last_messages[-1] if last_messages else None
+
+
 # ==================== ОБРАБОТЧИК ССЫЛОК ====================
 
 @dp.message(F.text.startswith("http"))
@@ -2825,18 +2965,12 @@ async def handle_link(message: Message):
                         pass
             
             if video_path:
-                await send_video_or_message(chat_id, video_path)
+                await send_video_with_description_button(chat_id, video_path, description)
                 cleanup_file(video_path)
                 increment_downloads(user_id)
             elif photos:
                 temp_photos = photos
-                media_group = [InputMediaPhoto(media=FSInputFile(photo)) for photo in photos]
-                
-                batch_size = 10
-                for i in range(0, len(media_group), batch_size):
-                    batch = media_group[i:i + batch_size]
-                    await bot.send_media_group(chat_id=chat_id, media=batch)
-                
+                await send_photos_with_description_button(chat_id, photos, description)
                 cleanup_files(photos)
                 increment_downloads(user_id)
             else:
