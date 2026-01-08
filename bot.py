@@ -1689,8 +1689,13 @@ class InstagramDownloader:
     def _extract_shortcode(self, url: str) -> Optional[str]:
         """Извлекает shortcode из Instagram URL."""
         import re
+        # Поддержка всех типов: /p/ (посты), /reel/, /reels/, /tv/
         match = re.search(r'/(p|reel|tv|reels)/([A-Za-z0-9_-]+)', url)
         return match.group(2) if match else None
+    
+    def _is_post_url(self, url: str) -> bool:
+        """Проверяет, является ли URL постом (не видео)."""
+        return '/p/' in url.lower() and '/reel' not in url.lower() and '/tv/' not in url.lower()
     
     async def _download_video(self, video_url: str, session: 'aiohttp.ClientSession' = None, extra_cookies: dict = None) -> Optional[str]:
         """Скачивает видео по прямой ссылке с поддержкой cookies."""
