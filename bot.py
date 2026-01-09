@@ -1753,6 +1753,75 @@ class InstagramDownloader:
         
         return None
     
+    async def _download_photos(self, photo_urls: List[str], session: 'aiohttp.ClientSession' = None) -> Optional[List[str]]:
+        """Скачивает фото по прямым ссылкам."""
+        import aiohttp
+        global IG_CONTEXT
+        
+        headers = {
+            'User-Agent': self.HEADERS['User-Agent'],
+            'Referer': 'https://www.instagram.com/',
+            'Origin': 'https://www.instagram.com',
+            'Accept': 'image/*,*/*',
+        }
+        
+        # Собираем cookies
+        cookie_str = ""
+        try:
+            if IG_CONTEXT:
+                cookies = await IG_CONTEXT.cookies()
+                ig_cookies = {c['name']: c['value'] for c in cookies if 'instagram' in c.get('domain', '')}
+                if ig_cookies:
+                    cookie_str = "; ".join(f"{k}={v}" for k, v in ig_cookies.items())
+        except Exception:
+            pass
+        
+        if cookie_str:
+            headers['Cookie'] = cookie_str
+        
+        close_session = False
+        if session is None:
+            session = aiohttp.ClientSession()
+            close_session = True
+        
+        downloaded_photos = []
+        temp_dir = tempfile.mkdtemp(prefix="ig_photos_")
+        
+        try:
+            for i, photo_url in enumerate(photo_urls):
+                try:
+                    async with session.get(photo_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status == 200:
+                            content = await resp.read()
+                            if len(content) > 5000:  # Минимум 5KB для фото
+                                # Определяем расширение
+                                content_type = resp.headers.get('content-type', '')
+                                if 'jpeg' in content_type or 'jpg' in content_type:
+                                    ext = '.jpg'
+                                elif 'png' in content_type:
+                                    ext = '.png'
+                                elif 'webp' in content_type:
+                                    ext = '.webp'
+                                else:
+                                    ext = '.jpg'  # По умолчанию
+                                
+                                temp_file = os.path.join(temp_dir, f"photo_{i+1}{ext}")
+                                with open(temp_file, 'wb') as f:
+                                    f.write(content)
+                                downloaded_photos.append(temp_file)
+                                self.logger.debug(f"Фото {i+1} скачано: {len(content)} bytes")
+                except Exception as e:
+                    self.logger.warning(f"Ошибка скачивания фото {i+1}: {e}")
+            
+            if downloaded_photos:
+                self.logger.info(f"Скачано {len(downloaded_photos)} фото")
+                return downloaded_photos
+        finally:
+            if close_session:
+                await session.close()
+        
+        return None
+    
     # ==================== МЕТОД 1: YT-DLP ====================
     
     async def _method_ytdlp(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
@@ -1823,7 +1892,7 @@ class InstagramDownloader:
     # ==================== МЕТОД 2: EMBED API ====================
     
     async def _method_embed(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-        """Скачивание через Instagram Embed страницу."""
+        """Скачивание через Instagram Embed страницу (видео и фото)."""
         import re
         import aiohttp
         
@@ -1847,12 +1916,12 @@ class InstagramDownloader:
                         html = await resp.text()
                         
                         # Ищем video_url в JSON
-                        patterns = [
+                        video_patterns = [
                             r'"video_url"\s*:\s*"([^"]+)"',
                             r'"contentUrl"\s*:\s*"([^"]+)"',
                         ]
                         
-                        for pattern in patterns:
+                        for pattern in video_patterns:
                             matches = re.findall(pattern, html)
                             for match in matches:
                                 video_url = match.replace('\\u0026', '&').replace('\\/', '/')
@@ -1860,6 +1929,29 @@ class InstagramDownloader:
                                     video_path = await self._download_video(video_url, session)
                                     if video_path:
                                         return video_path, None, ""
+                        
+                        # Ищем фото URL в embed
+                        # Instagram embed содержит изображения в разных форматах
+                        photo_patterns = [
+                            r'"display_url"\s*:\s*"([^"]+)"',
+                            r'"src"\s*:\s*"(https://[^"]*scontent[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
+                            r'"display_src"\s*:\s*"([^"]+)"',
+                        ]
+                        
+                        photo_urls = []
+                        for pattern in photo_patterns:
+                            matches = re.findall(pattern, html)
+                            for match in matches:
+                                photo_url = match.replace('\\u0026', '&').replace('\\/', '/')
+                                # Фильтруем только полноразмерные изображения
+                                if 'scontent' in photo_url and photo_url not in photo_urls:
+                                    photo_urls.append(photo_url)
+                        
+                        if photo_urls:
+                            self.logger.info(f"Найдено {len(photo_urls)} фото в embed")
+                            photos = await self._download_photos(photo_urls, session)
+                            if photos:
+                                return None, photos, ""
                 except Exception as e:
                     self.logger.debug(f"Embed {embed_url} не сработал: {e}")
         
@@ -1868,7 +1960,7 @@ class InstagramDownloader:
     # ==================== МЕТОД 3: FASTDL ====================
     
     async def _method_fastdl(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-        """Скачивание через FastDL.app API."""
+        """Скачивание через FastDL.app API (видео и фото)."""
         import re
         import aiohttp
         
@@ -1904,6 +1996,24 @@ class InstagramDownloader:
                         video_path = await self._download_video(video_url, session)
                         if video_path:
                             return video_path, None, ""
+                    
+                    # Ищем photo URLs
+                    photo_urls = []
+                    photo_patterns = [
+                        r'https://[^\s"\\]+scontent[^\s"\\]+\.(?:jpg|jpeg|png|webp)[^\s"\\]*',
+                    ]
+                    for pattern in photo_patterns:
+                        matches = re.findall(pattern, data_str)
+                        for m in matches:
+                            photo_url = m.replace('\\u0026', '&').replace('\\/', '/')
+                            if photo_url not in photo_urls and 'profile' not in photo_url.lower():
+                                photo_urls.append(photo_url)
+                    
+                    if photo_urls:
+                        self.logger.info(f"FastDL: найдено {len(photo_urls)} фото")
+                        photos = await self._download_photos(photo_urls, session)
+                        if photos:
+                            return None, photos, ""
             except Exception as e:
                 self.logger.debug(f"FastDL не сработал: {e}")
         
@@ -1912,7 +2022,7 @@ class InstagramDownloader:
     # ==================== МЕТОД 4: IGRAM ====================
     
     async def _method_igram(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-        """Скачивание через iGram.world API."""
+        """Скачивание через iGram.world API (видео и фото)."""
         import re
         import aiohttp
         
@@ -1938,22 +2048,38 @@ class InstagramDownloader:
                     
                     # Ищем video URL
                     items = data if isinstance(data, list) else data.get('items', []) if isinstance(data, dict) else []
+                    photo_urls = []
+                    
                     for item in items:
                         if isinstance(item, dict):
-                            video_url = item.get('url') or item.get('video_url')
-                            if video_url and ('mp4' in video_url or 'video' in video_url):
-                                video_path = await self._download_video(video_url, session)
-                                if video_path:
-                                    return video_path, None, ""
+                            item_url = item.get('url') or item.get('video_url') or item.get('image_url')
+                            if item_url:
+                                # Проверяем на видео
+                                if 'mp4' in item_url or 'video' in item_url:
+                                    video_path = await self._download_video(item_url, session)
+                                    if video_path:
+                                        return video_path, None, ""
+                                # Собираем фото URL
+                                elif any(ext in item_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                                    if item_url not in photo_urls:
+                                        photo_urls.append(item_url)
+                    
+                    # Если видео не найдено, скачиваем фото
+                    if photo_urls:
+                        self.logger.info(f"iGram: найдено {len(photo_urls)} фото")
+                        photos = await self._download_photos(photo_urls, session)
+                        if photos:
+                            return None, photos, ""
             except Exception as e:
                 self.logger.debug(f"iGram не сработал: {e}")
         
         return None, None, ""
+
     
     # ==================== МЕТОД 5: PLAYWRIGHT ====================
     
     async def _method_playwright(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-        """Скачивание через Playwright (fallback без cookies)."""
+        """Скачивание через Playwright (fallback, поддержка видео и фото)."""
         global IG_CONTEXT, IG_PLAYWRIGHT_READY
         
         if not IG_PLAYWRIGHT_READY or not IG_CONTEXT:
@@ -1961,23 +2087,32 @@ class InstagramDownloader:
             return None, None, ""
         
         page = None
-        captured_urls: List[str] = []
+        captured_video_urls: List[str] = []
+        captured_photo_urls: List[str] = []
         
         async def on_response(response):
-            """Перехват видео URL из сетевых запросов."""
+            """Перехват видео и фото URL из сетевых запросов."""
             try:
                 url_str = response.url.lower()
                 content_type = response.headers.get('content-type', '')
                 
-                # Пропускаем изображения
-                if any(x in url_str for x in ['/t51.', '.jpg', '.jpeg', '.png', '.webp', 'profile_pic']):
+                # Пропускаем маленькие иконки и профильные фото
+                if 'profile_pic' in url_str or '/s150x150/' in url_str or '_n.jpg' in url_str:
                     return
                 
                 # Проверяем на видео
                 if 'video' in content_type.lower() or any(x in url_str for x in ['/o1/v/t16/', '/o1/v/t2/', '.mp4']):
-                    if response.url not in captured_urls:
-                        captured_urls.append(response.url)
+                    if response.url not in captured_video_urls:
+                        captured_video_urls.append(response.url)
                         self.logger.debug(f"Перехвачен video URL: {response.url[:80]}...")
+                
+                # Проверяем на фото (большие изображения)
+                elif 'image' in content_type.lower() and 'scontent' in url_str:
+                    # Фильтруем полноразмерные изображения (обычно больше 1080)
+                    if any(x in url_str for x in ['/t51.', '/s1080', '/s1440', 'e35']) and 'profile' not in url_str:
+                        if response.url not in captured_photo_urls:
+                            captured_photo_urls.append(response.url)
+                            self.logger.debug(f"Перехвачен photo URL: {response.url[:80]}...")
             except:
                 pass
         
@@ -2009,11 +2144,11 @@ class InstagramDownloader:
                 pass
             
             # Скачиваем перехваченное видео
-            if captured_urls:
+            if captured_video_urls:
                 # Приоритет: /o1/v/t16/ > /o1/v/t2/ > .mp4 > любой
                 best_url = None
                 for pattern in ['/o1/v/t16/', '/o1/v/t2/', '.mp4']:
-                    for u in captured_urls:
+                    for u in captured_video_urls:
                         if pattern in u.lower():
                             best_url = u
                             break
@@ -2021,9 +2156,9 @@ class InstagramDownloader:
                         break
                 
                 if not best_url:
-                    best_url = captured_urls[0]
+                    best_url = captured_video_urls[0]
                 
-                self.logger.info(f"Используем перехваченный URL: {best_url[:60]}...")
+                self.logger.info(f"Используем перехваченный video URL: {best_url[:60]}...")
                 video_path = await self._download_video(best_url)
                 if video_path:
                     return video_path, None, description
@@ -2037,6 +2172,26 @@ class InstagramDownloader:
                         video_path = await self._download_video(video_url)
                         if video_path:
                             return video_path, None, description
+            except:
+                pass
+            
+            # Если нет видео, пробуем скачать фото
+            if captured_photo_urls:
+                self.logger.info(f"Видео не найдено, пробуем скачать {len(captured_photo_urls)} фото")
+                photos = await self._download_photos(captured_photo_urls)
+                if photos:
+                    return None, photos, description
+            
+            # Fallback: og:image
+            try:
+                og_image = page.locator('meta[property="og:image"]')
+                if await og_image.count() > 0:
+                    image_url = await og_image.first.get_attribute('content')
+                    if image_url and 'scontent' in image_url:
+                        self.logger.info(f"Пробуем скачать og:image")
+                        photos = await self._download_photos([image_url])
+                        if photos:
+                            return None, photos, description
             except:
                 pass
             
