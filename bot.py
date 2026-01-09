@@ -329,11 +329,13 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
     """Формирует опции для yt_dlp"""
     # Форматы с fallback на единый поток (для обхода блокировки audio)
     # best[ext=mp4] - единый поток со звуком, не требует merge
+    # Более гибкие форматы с fallback на любое расширение
+    # Если mp4 недоступен, используем любое видео и конвертируем через merge_output_format
     quality_formats = {
-        'best': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '1080p': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]',
-        '720p': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
-        '480p': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]',
+        'best': 'bestvideo+bestaudio/best',
+        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best',
+        '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best',
+        '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best',
         'audio': 'bestaudio[ext=m4a]/bestaudio/best',
     }
 
@@ -1352,26 +1354,129 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         try:
             from pytubefix import YouTube
             from pytubefix.cli import on_progress
+            import subprocess
+            
+            # Определяем целевое разрешение
+            target_height = 720
+            if quality == "best" or quality == "1080p":
+                target_height = 1080
+            elif quality == "480p":
+                target_height = 480
+            elif quality == "360p":
+                target_height = 360
             
             def _download_with_pytubefix():
                 yt = YouTube(url, on_progress_callback=on_progress)
+                temp_dir = tempfile.mkdtemp()
                 
                 # Выбираем качество
                 if quality == "audio":
-                    stream = yt.streams.filter(only_audio=True).first()
-                else:
-                    # Сначала пробуем progressive (видео+аудио вместе)
-                    stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-                    
-                    if not stream:
-                        # Если нет progressive, берём adaptive
-                        stream = yt.streams.filter(adaptive=True, file_extension='mp4').order_by('resolution').desc().first()
+                    stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
+                    if stream:
+                        output_path = stream.download(output_path=temp_dir)
+                        if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            return output_path
+                    return None
                 
-                if stream:
-                    temp_dir = tempfile.mkdtemp()
-                    output_path = stream.download(output_path=temp_dir)
-                    if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                        return output_path
+                # Ищем progressive stream с нужным качеством
+                progressive_streams = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc()
+                
+                # Выбираем лучший progressive, но не выше целевого
+                best_progressive = None
+                for ps in progressive_streams:
+                    try:
+                        res = int(ps.resolution.replace('p', '')) if ps.resolution else 0
+                        if res <= target_height:
+                            best_progressive = ps
+                            break
+                    except:
+                        best_progressive = ps
+                        break
+                
+                # Проверяем, достаточно ли качество progressive
+                if best_progressive:
+                    try:
+                        prog_res = int(best_progressive.resolution.replace('p', '')) if best_progressive.resolution else 0
+                        # Если progressive >= 480p или это единственный вариант, используем его
+                        if prog_res >= 480:
+                            output_path = best_progressive.download(output_path=temp_dir)
+                            if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                                return output_path
+                    except:
+                        pass
+                
+                # Progressive низкое качество или нет - используем adaptive с объединением
+                # Ищем лучший adaptive video stream
+                video_streams = yt.streams.filter(adaptive=True, only_video=True).order_by('resolution').desc()
+                best_video = None
+                for vs in video_streams:
+                    try:
+                        res = int(vs.resolution.replace('p', '')) if vs.resolution else 0
+                        if res <= target_height:
+                            best_video = vs
+                            break
+                    except:
+                        best_video = vs
+                        break
+                
+                # Если нет подходящего, берём первый
+                if not best_video and video_streams:
+                    best_video = list(video_streams)[0] if video_streams else None
+                
+                if not best_video:
+                    # Fallback на любой progressive
+                    if best_progressive:
+                        output_path = best_progressive.download(output_path=temp_dir)
+                        if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            return output_path
+                    return None
+                
+                # Скачиваем видео
+                video_path = best_video.download(output_path=temp_dir, filename='video_temp')
+                if not video_path or not os.path.exists(video_path):
+                    return None
+                
+                # Ищем лучший audio stream
+                audio_stream = yt.streams.filter(adaptive=True, only_audio=True).order_by('abr').desc().first()
+                
+                if audio_stream:
+                    # Скачиваем аудио
+                    audio_path = audio_stream.download(output_path=temp_dir, filename='audio_temp')
+                    
+                    if audio_path and os.path.exists(audio_path):
+                        # Объединяем через ffmpeg
+                        title = yt.title or 'video'
+                        # Очищаем название от недопустимых символов
+                        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:100]
+                        output_path = os.path.join(temp_dir, f"{safe_title}.mp4")
+                        
+                        try:
+                            cmd = [
+                                'ffmpeg', '-y',
+                                '-i', video_path,
+                                '-i', audio_path,
+                                '-c:v', 'copy',
+                                '-c:a', 'aac',
+                                '-strict', 'experimental',
+                                output_path
+                            ]
+                            subprocess.run(cmd, capture_output=True, timeout=120)
+                            
+                            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                                # Удаляем временные файлы
+                                try:
+                                    os.remove(video_path)
+                                    os.remove(audio_path)
+                                except:
+                                    pass
+                                return output_path
+                        except Exception as merge_err:
+                            logger.debug(f"FFmpeg merge ошибка: {merge_err}")
+                
+                # Если не удалось объединить, возвращаем только видео
+                if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+                    return video_path
+                
                 return None
             
             result = await asyncio.to_thread(_download_with_pytubefix)
