@@ -1930,20 +1930,11 @@ class InstagramDownloader:
             if img_hash not in url_groups or url_groups[img_hash][1] < size:
                 url_groups[img_hash] = (url, size)
         
-        # Возвращаем URL с наибольшим размером для каждой группы
-        # Если есть фото >= 640, берём только их; иначе берём все
+        # Возвращаем только URL с минимальным размером 640
         best_urls = []
-        small_urls = []
         for img_hash, (url, size) in url_groups.items():
             if size >= 640:
                 best_urls.append(url)
-            else:
-                small_urls.append((url, size))
-        
-        # Если нет больших фото, берём самые большие из маленьких
-        if not best_urls and small_urls:
-            small_urls.sort(key=lambda x: x[1], reverse=True)
-            best_urls = [url for url, size in small_urls]
         
         self.logger.debug(f"Отфильтровано {len(photo_urls)} -> {len(best_urls)} фото (удалены миниатюры)")
         return best_urls
@@ -2011,8 +2002,8 @@ class InstagramDownloader:
                         all_scontent = re.findall(r'https://scontent[^"\\]+(?:\.jpg|\.jpeg|\.png|\.webp)[^"\\]*', html)
                         for url in all_scontent:
                             clean_url = url.replace('\\u0026', '&').replace('\\/', '/')
-                            # Пропускаем только явные миниатюры
-                            if '/s150x150/' not in clean_url and '/s320x320/' not in clean_url and '/p150x150/' not in clean_url and '/p320x320/' not in clean_url:
+                            # Только высокое разрешение
+                            if any(x in clean_url for x in ['/p1080x1080/', '/e35/', '/s1080x1080/', '/s1440x1440/']):
                                 if clean_url not in photo_urls:
                                     photo_urls.append(clean_url)
                         
@@ -2169,8 +2160,8 @@ class InstagramDownloader:
                 url_str = response.url.lower()
                 content_type = response.headers.get('content-type', '')
                 
-                # Пропускаем маленькие иконки и профильные фото (только миниатюры)
-                if 'profile_pic' in url_str or '/s150x150/' in url_str or '/s320x320/' in url_str:
+                # Пропускаем маленькие иконки и профильные фото
+                if 'profile_pic' in url_str or '/s150x150/' in url_str or '_n.jpg' in url_str:
                     return
                 
                 # Проверяем на видео
@@ -2179,10 +2170,10 @@ class InstagramDownloader:
                         captured_video_urls.append(response.url)
                         self.logger.debug(f"Перехвачен video URL: {response.url[:80]}...")
                 
-                # Проверяем на фото (все изображения с scontent CDN)
+                # Проверяем на фото (большие изображения)
                 elif 'image' in content_type.lower() and 'scontent' in url_str:
-                    # Принимаем все изображения кроме профильных и маленьких
-                    if 'profile' not in url_str and '/t51.' in url_str:
+                    # Фильтруем полноразмерные изображения (обычно больше 1080)
+                    if any(x in url_str for x in ['/t51.', '/s1080', '/s1440', 'e35']) and 'profile' not in url_str:
                         if response.url not in captured_photo_urls:
                             captured_photo_urls.append(response.url)
                             self.logger.debug(f"Перехвачен photo URL: {response.url[:80]}...")
@@ -2193,8 +2184,7 @@ class InstagramDownloader:
             page = await IG_CONTEXT.new_page()
             page.on('response', on_response)
             
-            # Используем десктопный viewport для получения полноразмерных изображений
-            await page.set_viewport_size({"width": 1920, "height": 1080})
+            await page.set_viewport_size({"width": 375, "height": 812})
             
             # Загружаем страницу
             await page.goto(url, wait_until='networkidle', timeout=20000)
