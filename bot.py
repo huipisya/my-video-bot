@@ -327,15 +327,18 @@ def _read_netscape_cookiefile(file_path: str) -> List[Dict[str, Any]]:
 
 def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dict[str, Any]:
     """Формирует опции для yt_dlp"""
-    # Форматы с fallback на единый поток (для обхода блокировки audio)
-    # best[ext=mp4] - единый поток со звуком, не требует merge
+    # ВАЖНО: YouTube progressive streams ограничены до 360p!
+    # Для 720p+ нужен DASH (bestvideo+bestaudio) с merge через ffmpeg
+    # ios/android player clients обходят большинство ограничений
     quality_formats = {
-        'best': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '1080p': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]',
-        '720p': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
-        '480p': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]',
+        # DASH первый (высокое качество), progressive как fallback
+        'best': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+        '1080p': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        '720p': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]',
+        '480p': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]',
         'audio': 'bestaudio[ext=m4a]/bestaudio/best',
     }
+
 
     
     format_str = quality_formats.get(quality.lower(), quality_formats['720p'])
@@ -354,6 +357,8 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         'fragment_retries': 3,
         'extractor_retries': 3,
         'concurrent_fragment_downloads': 1,
+        # Важно: предпочитаем ffmpeg для merge
+        'postprocessor_args': {'ffmpeg': ['-c', 'copy']},
     }
 
     ytdlp_proxy = (os.getenv("YTDLP_PROXY") or "").strip()
@@ -380,11 +385,14 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
     if has_cookiefile:
         ydl_opts['cookiefile'] = cookie_file
 
+    # Используем несколько player clients - ios/android имеют меньше ограничений
     player_clients_raw = (os.getenv("YTDLP_YT_PLAYER_CLIENT") or "").strip()
     if player_clients_raw:
         player_clients = [c.strip() for c in player_clients_raw.split(",") if c.strip()]
     else:
-        player_clients = ["web"]
+        # ios и android клиенты обычно получают лучшее качество без блокировок
+        # web_creator тоже хороший вариант
+        player_clients = ["ios", "android", "web"]
 
     ydl_opts['extractor_args'] = ydl_opts.get('extractor_args') or {}
     ydl_opts['extractor_args']['youtube'] = ydl_opts['extractor_args'].get('youtube') or {}
@@ -396,6 +404,7 @@ def get_ydl_opts(quality: str = "720p", use_youtube_cookies: bool = True) -> Dic
         ydl_opts['extractor_args']['youtube']['po_token'] = po_token_value
     
     return ydl_opts
+
 
 # ==================== PLAYWRIGHT ====================
 
