@@ -1891,6 +1891,54 @@ class InstagramDownloader:
     
     # ==================== МЕТОД 2: EMBED API ====================
     
+    def _get_best_photo_urls(self, photo_urls: List[str]) -> List[str]:
+        """Выбирает лучшие (полноразмерные) версии фото, убирая дубликаты и миниатюры."""
+        import re
+        
+        # Группируем по базовому ID изображения
+        # Instagram URL формат: https://scontent.../hash_n.jpg?...
+        url_groups = {}
+        
+        for url in photo_urls:
+            # Извлекаем hash изображения (уникальный идентификатор)
+            # Пример: 123456789_123456789_123456789_n.jpg
+            hash_match = re.search(r'/([a-zA-Z0-9_]+)_n\.(jpg|jpeg|png|webp)', url)
+            if hash_match:
+                img_hash = hash_match.group(1)
+            else:
+                # Fallback - используем часть URL как ID
+                img_hash = url.split('/')[-1].split('?')[0]
+            
+            # Определяем размер изображения из URL
+            size = 0
+            size_match = re.search(r'/s(\d+)x\d+/', url)
+            if size_match:
+                size = int(size_match.group(1))
+            elif '/p1080x1080/' in url or '/e35/' in url:
+                size = 1080
+            elif '/p640x640/' in url:
+                size = 640
+            elif '/p320x320/' in url:
+                size = 320
+            elif '/p150x150/' in url:
+                size = 150
+            else:
+                # Если размер не указан, предполагаем полный размер
+                size = 1440
+            
+            # Сохраняем URL с наибольшим размером для каждого hash
+            if img_hash not in url_groups or url_groups[img_hash][1] < size:
+                url_groups[img_hash] = (url, size)
+        
+        # Возвращаем только URL с минимальным размером 640
+        best_urls = []
+        for img_hash, (url, size) in url_groups.items():
+            if size >= 640:
+                best_urls.append(url)
+        
+        self.logger.debug(f"Отфильтровано {len(photo_urls)} -> {len(best_urls)} фото (удалены миниатюры)")
+        return best_urls
+    
     async def _method_embed(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
         """Скачивание через Instagram Embed страницу (видео и фото)."""
         import re
@@ -1930,12 +1978,13 @@ class InstagramDownloader:
                                     if video_path:
                                         return video_path, None, ""
                         
-                        # Ищем фото URL в embed
-                        # Instagram embed содержит изображения в разных форматах
+                        # Ищем фото URL в embed - приоритет display_url (полноразмерные)
                         photo_patterns = [
+                            # Высокий приоритет - полноразмерные
                             r'"display_url"\s*:\s*"([^"]+)"',
-                            r'"src"\s*:\s*"(https://[^"]*scontent[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
                             r'"display_src"\s*:\s*"([^"]+)"',
+                            # Карусели - edge_sidecar_to_children содержит все фото
+                            r'"display_resources"\s*:\s*\[.*?"src"\s*:\s*"([^"]+)".*?\]',
                         ]
                         
                         photo_urls = []
@@ -1943,19 +1992,34 @@ class InstagramDownloader:
                             matches = re.findall(pattern, html)
                             for match in matches:
                                 photo_url = match.replace('\\u0026', '&').replace('\\/', '/')
-                                # Фильтруем только полноразмерные изображения
+                                # Фильтруем только scontent (CDN Instagram)
                                 if 'scontent' in photo_url and photo_url not in photo_urls:
-                                    photo_urls.append(photo_url)
+                                    # Пропускаем явные миниатюры
+                                    if '/s150x150/' not in photo_url and '/s320x320/' not in photo_url:
+                                        photo_urls.append(photo_url)
+                        
+                        # Дополнительно ищем все scontent URLs с высоким разрешением
+                        all_scontent = re.findall(r'https://scontent[^"\\]+(?:\.jpg|\.jpeg|\.png|\.webp)[^"\\]*', html)
+                        for url in all_scontent:
+                            clean_url = url.replace('\\u0026', '&').replace('\\/', '/')
+                            # Только высокое разрешение
+                            if any(x in clean_url for x in ['/p1080x1080/', '/e35/', '/s1080x1080/', '/s1440x1440/']):
+                                if clean_url not in photo_urls:
+                                    photo_urls.append(clean_url)
                         
                         if photo_urls:
-                            self.logger.info(f"Найдено {len(photo_urls)} фото в embed")
-                            photos = await self._download_photos(photo_urls, session)
-                            if photos:
-                                return None, photos, ""
+                            # Фильтруем дубликаты и миниатюры
+                            best_photos = self._get_best_photo_urls(photo_urls)
+                            if best_photos:
+                                self.logger.info(f"Найдено {len(best_photos)} полноразмерных фото в embed")
+                                photos = await self._download_photos(best_photos, session)
+                                if photos:
+                                    return None, photos, ""
                 except Exception as e:
                     self.logger.debug(f"Embed {embed_url} не сработал: {e}")
         
         return None, None, ""
+
     
     # ==================== МЕТОД 3: FASTDL ====================
     
@@ -2177,10 +2241,14 @@ class InstagramDownloader:
             
             # Если нет видео, пробуем скачать фото
             if captured_photo_urls:
-                self.logger.info(f"Видео не найдено, пробуем скачать {len(captured_photo_urls)} фото")
-                photos = await self._download_photos(captured_photo_urls)
-                if photos:
-                    return None, photos, description
+                # Фильтруем дубликаты и миниатюры
+                best_photos = self._get_best_photo_urls(captured_photo_urls)
+                if best_photos:
+                    self.logger.info(f"Видео не найдено, скачиваем {len(best_photos)} полноразмерных фото")
+                    photos = await self._download_photos(best_photos)
+                    if photos:
+                        return None, photos, description
+
             
             # Fallback: og:image
             try:
