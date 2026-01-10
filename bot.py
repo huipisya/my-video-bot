@@ -2143,7 +2143,12 @@ class InstagramDownloader:
     # ==================== МЕТОД 5: PLAYWRIGHT ====================
     
     async def _method_playwright(self, url: str) -> Tuple[Optional[str], Optional[List[str]], str]:
-        """Скачивание через Playwright (fallback, поддержка видео и фото)."""
+        """Скачивание через Playwright (fallback, поддержка видео и фото).
+        
+        Извлекает фото/видео напрямую из данных поста, а не перехватывает все сетевые запросы.
+        Это исключает попадание рекомендаций, аватарок и других посторонних изображений.
+        """
+        import re
         global IG_CONTEXT, IG_PLAYWRIGHT_READY
         
         if not IG_PLAYWRIGHT_READY or not IG_CONTEXT:
@@ -2152,38 +2157,18 @@ class InstagramDownloader:
         
         page = None
         captured_video_urls: List[str] = []
-        captured_photo_urls: List[str] = []
         
         async def on_response(response):
-            """Перехват видео и фото URL из сетевых запросов."""
+            """Перехват только видео URL из сетевых запросов."""
             try:
                 url_str = response.url.lower()
                 content_type = response.headers.get('content-type', '')
                 
-                # Пропускаем маленькие иконки и профильные фото
-                # НЕ пропускаем _n.jpg - это стандартный суффикс для всех фото Instagram!
-                if 'profile_pic' in url_str or '/s150x150/' in url_str or '/s320x320/' in url_str:
-                    return
-                
-                # Проверяем на видео
+                # Проверяем только на видео
                 if 'video' in content_type.lower() or any(x in url_str for x in ['/o1/v/t16/', '/o1/v/t2/', '.mp4']):
                     if response.url not in captured_video_urls:
                         captured_video_urls.append(response.url)
                         self.logger.debug(f"Перехвачен video URL: {response.url[:80]}...")
-                
-                # Проверяем на фото (большие изображения из Instagram CDN)
-                elif 'image' in content_type.lower() and 'scontent' in url_str:
-                    # Фильтруем только полноразмерные изображения, пропуская миниатюры
-                    # _n.jpg - это стандартный суффикс Instagram для обычных фото
-                    # /t51. - это маркер фото контента Instagram
-                    is_full_size = any(x in url_str for x in ['/t51.', '/s1080', '/s1440', 'e35', '_n.jpg', '_n.webp', '_n.png'])
-                    is_not_thumbnail = '/s150x150/' not in url_str and '/s320x320/' not in url_str and '/s640x640/' not in url_str
-                    is_not_profile = 'profile' not in url_str
-                    
-                    if is_full_size and is_not_thumbnail and is_not_profile:
-                        if response.url not in captured_photo_urls:
-                            captured_photo_urls.append(response.url)
-                            self.logger.debug(f"Перехвачен photo URL: {response.url[:80]}...")
             except:
                 pass
         
@@ -2246,29 +2231,71 @@ class InstagramDownloader:
             except:
                 pass
             
-            # Если нет видео, пробуем скачать фото
-            if captured_photo_urls:
+            # ========== ИЗВЛЕЧЕНИЕ ФОТО ИЗ ДАННЫХ ПОСТА ==========
+            # Вместо перехвата всех сетевых запросов, парсим данные поста напрямую
+            post_photo_urls = []
+            
+            try:
+                # Получаем HTML страницы
+                html_content = await page.content()
+                
+                # Ищем JSON данные поста в различных местах
+                # 1. window._sharedData (старый формат)
+                shared_data_match = re.search(r'window\._sharedData\s*=\s*(\{.+?\});</script>', html_content)
+                if shared_data_match:
+                    try:
+                        import json
+                        shared_data = json.loads(shared_data_match.group(1))
+                        media = shared_data.get('entry_data', {}).get('PostPage', [{}])[0].get('graphql', {}).get('shortcode_media', {})
+                        
+                        # Одиночное фото
+                        if media.get('display_url'):
+                            post_photo_urls.append(media['display_url'])
+                        
+                        # Карусель
+                        edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
+                        for edge in edges:
+                            node = edge.get('node', {})
+                            if node.get('display_url') and not node.get('is_video'):
+                                if node['display_url'] not in post_photo_urls:
+                                    post_photo_urls.append(node['display_url'])
+                    except Exception as e:
+                        self.logger.debug(f"Ошибка парсинга _sharedData: {e}")
+                
+                # 2. Ищем display_url напрямую в HTML (более надёжно)
+                if not post_photo_urls:
+                    # Паттерн для display_url с полным размером
+                    display_urls = re.findall(r'"display_url"\s*:\s*"(https://scontent[^"]+)"', html_content)
+                    for url in display_urls:
+                        clean_url = url.replace('\\u0026', '&').replace('\\/', '/')
+                        # Берём только уникальные URL
+                        if clean_url not in post_photo_urls:
+                            post_photo_urls.append(clean_url)
+                
+                # 3. Ищем в meta тегах og:image (последний fallback)
+                if not post_photo_urls:
+                    og_images = re.findall(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', html_content)
+                    for img_url in og_images:
+                        if 'scontent' in img_url and img_url not in post_photo_urls:
+                            post_photo_urls.append(img_url)
+            
+            except Exception as e:
+                self.logger.debug(f"Ошибка извлечения фото из HTML: {e}")
+            
+            # Скачиваем найденные фото поста
+            if post_photo_urls:
+                # Ограничиваем количество - обычно в посте не больше 10 фото
+                # Это защита от случайного захвата рекомендаций
+                max_photos = 10
+                post_photo_urls = post_photo_urls[:max_photos]
+                
                 # Фильтруем дубликаты и миниатюры
-                best_photos = self._get_best_photo_urls(captured_photo_urls)
+                best_photos = self._get_best_photo_urls(post_photo_urls)
                 if best_photos:
-                    self.logger.info(f"Видео не найдено, скачиваем {len(best_photos)} полноразмерных фото")
+                    self.logger.info(f"Извлечено {len(best_photos)} фото из данных поста")
                     photos = await self._download_photos(best_photos)
                     if photos:
                         return None, photos, description
-
-            
-            # Fallback: og:image
-            try:
-                og_image = page.locator('meta[property="og:image"]')
-                if await og_image.count() > 0:
-                    image_url = await og_image.first.get_attribute('content')
-                    if image_url and 'scontent' in image_url:
-                        self.logger.info(f"Пробуем скачать og:image")
-                        photos = await self._download_photos([image_url])
-                        if photos:
-                            return None, photos, description
-            except:
-                pass
             
         except Exception as e:
             self.logger.error(f"Playwright ошибка: {e}")
