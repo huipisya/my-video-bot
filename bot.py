@@ -2161,7 +2161,8 @@ class InstagramDownloader:
                 content_type = response.headers.get('content-type', '')
                 
                 # Пропускаем маленькие иконки и профильные фото
-                if 'profile_pic' in url_str or '/s150x150/' in url_str or '_n.jpg' in url_str:
+                # НЕ пропускаем _n.jpg - это стандартный суффикс для всех фото Instagram!
+                if 'profile_pic' in url_str or '/s150x150/' in url_str or '/s320x320/' in url_str:
                     return
                 
                 # Проверяем на видео
@@ -2170,10 +2171,16 @@ class InstagramDownloader:
                         captured_video_urls.append(response.url)
                         self.logger.debug(f"Перехвачен video URL: {response.url[:80]}...")
                 
-                # Проверяем на фото (большие изображения)
+                # Проверяем на фото (большие изображения из Instagram CDN)
                 elif 'image' in content_type.lower() and 'scontent' in url_str:
-                    # Фильтруем полноразмерные изображения (обычно больше 1080)
-                    if any(x in url_str for x in ['/t51.', '/s1080', '/s1440', 'e35']) and 'profile' not in url_str:
+                    # Фильтруем только полноразмерные изображения, пропуская миниатюры
+                    # _n.jpg - это стандартный суффикс Instagram для обычных фото
+                    # /t51. - это маркер фото контента Instagram
+                    is_full_size = any(x in url_str for x in ['/t51.', '/s1080', '/s1440', 'e35', '_n.jpg', '_n.webp', '_n.png'])
+                    is_not_thumbnail = '/s150x150/' not in url_str and '/s320x320/' not in url_str and '/s640x640/' not in url_str
+                    is_not_profile = 'profile' not in url_str
+                    
+                    if is_full_size and is_not_thumbnail and is_not_profile:
                         if response.url not in captured_photo_urls:
                             captured_photo_urls.append(response.url)
                             self.logger.debug(f"Перехвачен photo URL: {response.url[:80]}...")
