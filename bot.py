@@ -1347,8 +1347,8 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         return None
     
     # API 5: pytubefix (не зависит от yt-dlp)
-    async def try_pytubefix() -> Optional[str]:
-        logger.info("Пробуем pytubefix...")
+    async def try_pytubefix(retry_with_cookies: bool = False) -> Optional[str]:
+        logger.info(f"Пробуем pytubefix...{' (повторная попытка)' if retry_with_cookies else ''}")
         try:
             from pytubefix import YouTube
             from pytubefix.cli import on_progress
@@ -1380,8 +1380,15 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
                 return result
         except ImportError:
             logger.debug("pytubefix не установлен")
+            return None
         except Exception as e:
             logger.warning(f"pytubefix ошибка: {e}")
+            
+            # Если это первая попытка и ошибка похожа на блокировку - обновляем cookies и пробуем ещё раз
+            if not retry_with_cookies and _is_block_error(e):
+                logger.info("pytubefix блокировка! Обновляем cookies и пробуем снова...")
+                if await refresh_youtube_visitor_data():
+                    return await try_pytubefix(retry_with_cookies=True)
         return None
     
     # API 6: Invidious (бесплатные инстансы)
