@@ -1790,12 +1790,9 @@ class InstagramDownloader:
         try:
             for i, photo_url in enumerate(photo_urls):
                 try:
-                    self.logger.debug(f"Скачиваем фото {i+1}: {photo_url[:80]}...")
                     async with session.get(photo_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        self.logger.debug(f"Фото {i+1} статус: {resp.status}")
                         if resp.status == 200:
                             content = await resp.read()
-                            self.logger.debug(f"Фото {i+1} размер: {len(content)} bytes")
                             if len(content) > 5000:  # Минимум 5KB для фото
                                 # Определяем расширение
                                 content_type = resp.headers.get('content-type', '')
@@ -1813,18 +1810,12 @@ class InstagramDownloader:
                                     f.write(content)
                                 downloaded_photos.append(temp_file)
                                 self.logger.debug(f"Фото {i+1} скачано: {len(content)} bytes")
-                            else:
-                                self.logger.warning(f"Фото {i+1} слишком маленькое: {len(content)} bytes (минимум 5000)")
-                        else:
-                            self.logger.warning(f"Фото {i+1} HTTP ошибка: {resp.status}")
                 except Exception as e:
                     self.logger.warning(f"Ошибка скачивания фото {i+1}: {e}")
             
             if downloaded_photos:
                 self.logger.info(f"Скачано {len(downloaded_photos)} фото")
                 return downloaded_photos
-            else:
-                self.logger.warning(f"Не удалось скачать ни одного фото из {len(photo_urls)}")
         finally:
             if close_session:
                 await session.close()
@@ -2298,25 +2289,13 @@ class InstagramDownloader:
                 max_photos = 10
                 post_photo_urls = post_photo_urls[:max_photos]
                 
-                # Декодируем escaped Unicode символы в URL
-                decoded_urls = []
-                for url in post_photo_urls:
-                    # Декодируем только известные escape-последовательности Instagram
-                    # НЕ используем codecs.decode - он может сломать URL
-                    decoded_url = url.replace('\\u0026', '&').replace('\\/', '/').replace('\\u003c', '<').replace('\\u003e', '>')
-                    decoded_urls.append(decoded_url)
-                
-                self.logger.debug(f"Найденные photo URLs: {[u[:60] for u in decoded_urls]}")
-                
                 # Фильтруем дубликаты и миниатюры
-                best_photos = self._get_best_photo_urls(decoded_urls)
+                best_photos = self._get_best_photo_urls(post_photo_urls)
                 if best_photos:
                     self.logger.info(f"Извлечено {len(best_photos)} фото из данных поста")
                     photos = await self._download_photos(best_photos)
                     if photos:
                         return None, photos, description
-                    else:
-                        self.logger.warning(f"_download_photos вернул None для URL: {best_photos[0][:80]}...")
             
         except Exception as e:
             self.logger.error(f"Playwright ошибка: {e}")
