@@ -1352,26 +1352,105 @@ async def download_youtube(url: str, quality: str = "720p") -> Optional[str]:
         try:
             from pytubefix import YouTube
             from pytubefix.cli import on_progress
+            import subprocess
+            import shutil
             
             def _download_with_pytubefix():
                 yt = YouTube(url, on_progress_callback=on_progress)
+                temp_dir = tempfile.mkdtemp(prefix="yt_pytube_")
                 
                 # Выбираем качество
                 if quality == "audio":
-                    stream = yt.streams.filter(only_audio=True).first()
-                else:
-                    # Сначала пробуем progressive (видео+аудио вместе)
-                    stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-                    
-                    if not stream:
-                        # Если нет progressive, берём adaptive
-                        stream = yt.streams.filter(adaptive=True, file_extension='mp4').order_by('resolution').desc().first()
+                    stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
+                    if stream:
+                        output_path = stream.download(output_path=temp_dir)
+                        if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            return output_path
+                    return None
                 
+                # === Стратегия: adaptive video + audio → ffmpeg merge ===
+                # Progressive стримы на YouTube ограничены ~360p, поэтому
+                # скачиваем видео и аудио отдельно и мержим через ffmpeg
+                
+                ffmpeg_path = shutil.which('ffmpeg')
+                
+                # Определяем целевую высоту из quality
+                target_heights = {
+                    'best': 9999, '1080p': 1080, '720p': 720, '480p': 480,
+                }
+                max_height = target_heights.get(quality.lower(), 720)
+                
+                # Ищем лучший adaptive video stream в пределах запрошенного качества
+                video_streams = yt.streams.filter(
+                    adaptive=True, only_video=True
+                ).order_by('resolution').desc()
+                
+                video_stream = None
+                for vs in video_streams:
+                    try:
+                        res_height = int(vs.resolution.replace('p', '')) if vs.resolution else 0
+                    except (ValueError, AttributeError):
+                        res_height = 0
+                    if res_height <= max_height:
+                        video_stream = vs
+                        break
+                
+                # Если не нашли в пределах лимита, берём минимальный
+                if not video_stream and video_streams:
+                    video_stream = list(video_streams)[-1]  # самый низкий
+                
+                audio_stream = yt.streams.filter(
+                    adaptive=True, only_audio=True
+                ).order_by('abr').desc().first()
+                
+                if video_stream and audio_stream and ffmpeg_path:
+                    # Скачиваем видео и аудио раздельно
+                    logger.info(f"pytubefix: скачиваем adaptive video ({video_stream.resolution}) + audio ({audio_stream.abr})")
+                    video_path = video_stream.download(output_path=temp_dir, filename='video_only')
+                    audio_path = audio_stream.download(output_path=temp_dir, filename='audio_only')
+                    
+                    if not (video_path and os.path.exists(video_path) and audio_path and os.path.exists(audio_path)):
+                        logger.warning("pytubefix: не удалось скачать adaptive streams")
+                        # Fallback на progressive ниже
+                    else:
+                        # Мержим через ffmpeg
+                        output_path = os.path.join(temp_dir, f'{yt.video_id or "video"}.mp4')
+                        merge_cmd = [
+                            ffmpeg_path, '-y',
+                            '-i', video_path,
+                            '-i', audio_path,
+                            '-c:v', 'copy', '-c:a', 'aac',
+                            '-movflags', '+faststart',
+                            '-f', 'mp4',
+                            output_path
+                        ]
+                        
+                        try:
+                            proc = subprocess.run(merge_cmd, capture_output=True, timeout=120)
+                            if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                                logger.info(f"pytubefix: merged video ({os.path.getsize(output_path)} bytes)")
+                                # Удаляем исходники
+                                try:
+                                    os.remove(video_path)
+                                    os.remove(audio_path)
+                                except Exception:
+                                    pass
+                                return output_path
+                            else:
+                                stderr = proc.stderr.decode('utf-8', errors='ignore')[:200] if proc.stderr else ''
+                                logger.warning(f"pytubefix: ffmpeg merge failed (code={proc.returncode}): {stderr}")
+                        except subprocess.TimeoutExpired:
+                            logger.warning("pytubefix: ffmpeg merge timeout")
+                
+                # === Fallback: progressive (если adaptive/ffmpeg недоступны) ===
+                logger.info("pytubefix: fallback на progressive stream")
+                stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
                 if stream:
-                    temp_dir = tempfile.mkdtemp()
+                    logger.info(f"pytubefix: progressive stream {stream.resolution}")
                     output_path = stream.download(output_path=temp_dir)
                     if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
                         return output_path
+                
                 return None
             
             result = await asyncio.to_thread(_download_with_pytubefix)
@@ -1666,13 +1745,67 @@ class InstagramDownloader:
         return None, None, ""
     
     async def _expand_share_url(self, url: str) -> Optional[str]:
-        """Разворачивает share-ссылку в полный URL."""
+        """Разворачивает share-ссылку в полный URL.
+        
+        iPhone генерирует ссылки вида:
+        - instagram.com/share/reel/CODE
+        - instagram.com/share/p/CODE  
+        - instagram.com/share/CODE (без типа)
+        - instagram.com/share/CODE?igsh=...
+        """
         import re
         import aiohttp
         
+        # Убираем tracking параметры ДО обработки
+        clean_url = re.sub(r'[?&]igsh=[^&]+', '', url)
+        clean_url = re.sub(r'[?&]utm_[^&]+', '', clean_url)
+        clean_url = re.sub(r'\?$', '', clean_url)
+        
+        # === Метод 1: Извлечь shortcode прямо из share URL ===
+        # /share/reel/CODE → /reel/CODE
+        # /share/p/CODE → /p/CODE
+        share_with_type = re.search(r'/share/(reel|reels|p|tv)/([A-Za-z0-9_-]+)', clean_url)
+        if share_with_type:
+            content_type = share_with_type.group(1)
+            shortcode = share_with_type.group(2)
+            if content_type == 'reels':
+                content_type = 'reel'
+            result_url = f"https://www.instagram.com/{content_type}/{shortcode}/"
+            self.logger.info(f"Share URL разобран напрямую: {result_url}")
+            return result_url
+        
+        # /share/CODE (без типа — пробуем как reel, потом как post)
+        share_bare = re.search(r'/share/([A-Za-z0-9_-]{6,})', clean_url)
+        if share_bare:
+            shortcode = share_bare.group(1)
+            # Пробуем определить тип через HTTP HEAD запрос
+            for content_type in ['reel', 'p']:
+                test_url = f"https://www.instagram.com/{content_type}/{shortcode}/"
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.head(
+                            test_url,
+                            allow_redirects=True,
+                            timeout=aiohttp.ClientTimeout(total=8),
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                            }
+                        ) as resp:
+                            if resp.status == 200:
+                                self.logger.info(f"Share URL определён как {content_type}: {test_url}")
+                                return test_url
+                except Exception:
+                    continue
+        
+        # === Метод 2: HTTP redirect (классический) ===
         try:
-            async with aiohttp.ClientSession(headers=self.HEADERS) as session:
-                async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            iphone_headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            }
+            async with aiohttp.ClientSession(headers=iphone_headers) as session:
+                async with session.get(clean_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     final_url = str(resp.url)
                     
                     # Очищаем от tracking параметров
@@ -1683,19 +1816,41 @@ class InstagramDownloader:
                     if 'instagram.com' in final_url and any(x in final_url for x in ['/p/', '/reel/', '/tv/', '/reels/']):
                         return final_url
                     
-                    # Пробуем найти в HTML
+                    # Пробуем найти в HTML (JS-редиректы, meta refresh)
                     html = await resp.text()
+                    
+                    # Ищем в стандартных ссылках
                     match = re.search(r'instagram\.com/(reel|p|tv)/([A-Za-z0-9_-]+)', html)
                     if match:
                         return f"https://www.instagram.com/{match.group(1)}/{match.group(2)}/"
+                    
+                    # Ищем meta http-equiv="refresh" redirect
+                    meta_match = re.search(r'<meta[^>]*http-equiv=["\']refresh["\'][^>]*url=([^"\'>\s]+)', html, re.IGNORECASE)
+                    if meta_match:
+                        redirect_url = meta_match.group(1)
+                        reel_match = re.search(r'instagram\.com/(reel|p|tv)/([A-Za-z0-9_-]+)', redirect_url)
+                        if reel_match:
+                            return f"https://www.instagram.com/{reel_match.group(1)}/{reel_match.group(2)}/"
+                    
+                    # Ищем window.location redirect в JS
+                    js_match = re.search(r'window\.location(?:\.href)?\s*=\s*["\']([^"\'>]+instagram\.com[^"\'>]+)["\']', html)
+                    if js_match:
+                        js_url = js_match.group(1)
+                        reel_match = re.search(r'instagram\.com/(reel|p|tv)/([A-Za-z0-9_-]+)', js_url)
+                        if reel_match:
+                            return f"https://www.instagram.com/{reel_match.group(1)}/{reel_match.group(2)}/"
         except Exception as e:
-            self.logger.warning(f"Ошибка разворачивания share URL: {e}")
+            self.logger.warning(f"Ошибка разворачивания share URL через HTTP: {e}")
         
         return None
     
     def _extract_shortcode(self, url: str) -> Optional[str]:
         """Извлекает shortcode из Instagram URL."""
         import re
+        # Поддержка share ссылок: /share/reel/CODE, /share/p/CODE
+        share_match = re.search(r'/share/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)', url)
+        if share_match:
+            return share_match.group(1)
         # Поддержка всех типов: /p/ (посты), /reel/, /reels/, /tv/
         match = re.search(r'/(p|reel|tv|reels)/([A-Za-z0-9_-]+)', url)
         return match.group(2) if match else None
@@ -2445,6 +2600,41 @@ async def fix_video_for_telegram(file_path: str) -> Optional[str]:
         logger.warning("ffmpeg не найден в системе, пропускаем исправление метаданных")
         return file_path
     
+    # === Проверка целостности через ffprobe ===
+    ffprobe_path = shutil.which('ffprobe')
+    if ffprobe_path:
+        try:
+            probe_cmd = [
+                ffprobe_path, '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height,duration,codec_name',
+                '-show_entries', 'format=duration',
+                '-of', 'json',
+                file_path
+            ]
+            probe_result = await asyncio.to_thread(
+                subprocess.run, probe_cmd, capture_output=True, timeout=15
+            )
+            if probe_result.returncode == 0:
+                probe_data = json.loads(probe_result.stdout.decode('utf-8', errors='ignore'))
+                streams = probe_data.get('streams', [])
+                fmt = probe_data.get('format', {})
+                
+                if streams:
+                    s = streams[0]
+                    w = s.get('width', '?')
+                    h = s.get('height', '?')
+                    codec = s.get('codec_name', '?')
+                    duration = fmt.get('duration', s.get('duration', '?'))
+                    logger.info(f"Видео: {w}x{h}, codec={codec}, duration={duration}s")
+                else:
+                    logger.warning(f"ffprobe: видео потоки не обнаружены в {file_path}")
+            else:
+                stderr = probe_result.stderr.decode('utf-8', errors='ignore')[:200]
+                logger.warning(f"ffprobe ошибка (code={probe_result.returncode}): {stderr}")
+        except Exception as e:
+            logger.debug(f"ffprobe проверка пропущена: {e}")
+    
     try:
         # Создаём временный файл для выходного видео
         temp_dir = os.path.dirname(file_path)
@@ -2944,17 +3134,9 @@ async def handle_link(message: Message):
         platform = "tiktok"
     elif "instagram.com" in url or "instagr.am" in url:
         platform = "instagram"
-        # Обработка всех Instagram share ссылок (включая iPhone share ссылки)
-        if "/share/" in url or "instagram.com/share/" in url or url.startswith("https://www.instagram.com/share/"):
-            logger.info(f"Обнаружена Instagram share ссылка: {url}")
-            try:
-                # Развернуть share ссылку в полную
-                expanded_url = await expand_instagram_share_url(url)
-                if expanded_url and expanded_url != url:
-                    url = expanded_url
-                    logger.info(f"Развернутая URL: {url}")
-            except Exception as e:
-                logger.warning(f"Не удалось развернуть share ссылку: {e}")
+        # Share ссылки (включая iPhone) разворачиваются внутри InstagramDownloader.download()
+        if "/share/" in url:
+            logger.info(f"Обнаружена Instagram share ссылка, будет развёрнута при скачивании: {url[:60]}")
     else:
         await message.answer(
             "Неподдерживаемая платформа.\n\n"
