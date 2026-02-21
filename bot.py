@@ -2499,34 +2499,31 @@ async def upload_to_0x0(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка загрузки на 0x0.st: {e}")
     return None
 
-async def upload_to_uguu(file_path: str) -> Optional[str]:
-    url = (os.getenv('UGUU_URL') or 'https://uguu.se/upload').strip()
+async def upload_to_pixeldrain(file_path: str) -> Optional[str]:
     try:
         async with aiohttp.ClientSession() as session:
             with open(file_path, 'rb') as f:
                 data = aiohttp.FormData()
-                data.add_field('files[]', f, filename=Path(file_path).name)
-                async with session.post(url, data=data, headers={'Accept': 'application/json'}) as resp:
+                data.add_field('file', f, filename=Path(file_path).name)
+                async with session.post(
+                    'https://pixeldrain.com/api/file/',
+                    data=data,
+                    timeout=aiohttp.ClientTimeout(total=600)
+                ) as resp:
                     body_text = (await resp.text()).strip()
-                    if resp.status != 200:
-                        logger.error(f"uguu ответил {resp.status}: {body_text[:500]}")
+                    if resp.status != 201:
+                        logger.error(f"pixeldrain ответил {resp.status}: {body_text[:500]}")
                         return None
                     try:
                         payload = json.loads(body_text)
                     except Exception:
-                        if body_text.startswith('http'):
-                            return body_text.splitlines()[0].strip()
-                        logger.error(f"uguu вернул не-JSON (Content-Type={resp.headers.get('Content-Type')}): {body_text[:500]}")
+                        logger.error(f"pixeldrain вернул не-JSON: {body_text[:500]}")
                         return None
-                    files = payload.get('files')
-                    if isinstance(files, list) and files:
-                        file0 = files[0]
-                        if isinstance(file0, dict):
-                            url_value = file0.get('url') or file0.get('link')
-                            if isinstance(url_value, str) and url_value.startswith('http'):
-                                return url_value
+                    file_id = payload.get('id')
+                    if file_id:
+                        return f"https://pixeldrain.com/u/{file_id}"
     except Exception as e:
-        logger.error(f"Ошибка загрузки на uguu: {e}")
+        logger.error(f"Ошибка загрузки на pixeldrain: {e}")
     return None
 
 async def upload_to_fileio(file_path: str) -> Optional[str]:
@@ -2541,12 +2538,15 @@ async def upload_to_fileio(file_path: str) -> Optional[str]:
     file_size = os.path.getsize(file_path)
     
     if file_size > max_size:
+        size_mb = file_size // 1024 // 1024
+        logger.info(f"file.io: файл {size_mb}MB > 50MB, пробуем 0x0.st...")
         link = await upload_to_0x0(file_path)
         if not link:
-            link = await upload_to_uguu(file_path)
+            logger.info(f"file.io: пробуем pixeldrain...")
+            link = await upload_to_pixeldrain(file_path)
         if link:
             return link
-        logger.error(f"Не удалось загрузить файл на 0x0.st и uguu")
+        logger.error(f"Не удалось загрузить файл {size_mb}MB на 0x0.st и pixeldrain")
         return None
 
     try:
@@ -2701,13 +2701,20 @@ async def send_video_or_message(chat_id: int, file_path: str, caption: str = "")
             file_size = os.path.getsize(file_path)
     
     if file_size > max_telegram_file_size:
+        size_mb = file_size // 1024 // 1024
+        logger.info(f"Файл {size_mb}MB > 50MB лимита Telegram, загружаем на файлообменник...")
+        await bot.send_message(chat_id, f"Файл большой ({size_mb} MB), загружаю на файлообменник...")
+        logger.info("Пробуем загрузить на 0x0.st...")
         link = await upload_to_0x0(file_path)
         if not link:
-            link = await upload_to_uguu(file_path)
+            logger.info("Пробуем загрузить на pixeldrain...")
+            link = await upload_to_pixeldrain(file_path)
         if link:
+            logger.info(f"Файл успешно загружен: {link}")
             await bot.send_message(chat_id, f"Файл слишком большой для Telegram.\nСсылка: {link}")
         else:
-            await bot.send_message(chat_id, "Не удалось загрузить файл.")
+            logger.error(f"Не удалось загрузить файл {size_mb}MB ни на 0x0.st, ни на pixeldrain")
+            await bot.send_message(chat_id, f"Не удалось загрузить файл ({size_mb} MB) — слишком большой для всех доступных хостингов.")
     else:
         input_file = FSInputFile(file_path)
         try:
